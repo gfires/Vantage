@@ -49,7 +49,7 @@ TRAIL_LEN    = 60   # frames of hip position history to show
 GRAPH_FRAMES = 90   # frames shown in scrolling graph
 
 # ── Output toggles ────────────────────────────────────────────────────────────
-SAVE_VIDEO  = True   # write annotated MP4 alongside input, then auto-open it
+SAVE_VIDEO  = False   # write annotated MP4 alongside input, then auto-open it
 SHOW_LIVE   = True   # display frames in a cv2 window as they are rendered
 
 # ── Estimated anatomical marker tuning ───────────────────────────────────────
@@ -60,6 +60,14 @@ KNEE_TOP_OVERSHOOT   = 0.18
 # Hip-crease marker: shoulder→hip vector, this fraction of the way from shoulder.
 # 0.90 = 90% along shoulder→hip (i.e. 10% above the hip joint center).
 HIP_CREASE_FRAC      = 0.88
+
+# ── Rep segmentation tuning ───────────────────────────────────────────────────
+REP_SMOOTHING  = 15   # shoulder Y smoothing window — larger = coarser boundaries
+MIN_REP_FRAMES = 15   # minimum valid frames per rep to count (rejects noise spikes)
+# A segment is only counted as a rep if the estimated markers got within this
+# fraction of frame height from parallel at some point. Rejects hip-hinge
+# warmup/setup movements that never approach depth.
+MIN_DESCENT_THRESHOLD = 0.10  # 10% of frame height above parallel
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -103,14 +111,15 @@ def main():
         print("ERROR: Could not detect pose or squat bottom. Check camera angle.")
         sys.exit(1)
 
-    frames_data, side, bottom_global, result, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
+    frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
 
-    print(f"  Side: {side} | Bottom frame: {bottom_global} | Result: {result.upper()}")
+    for i, rep in enumerate(reps, 1):
+        print(f"  Rep {i}: {rep['result'].upper():12} (bottom frame {rep['bottom_global']})")
     print("Pass 2: rendering annotated video...")
 
     cap2 = cv2.VideoCapture(str(path))
     cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)  # prevent double-rotate on macOS
-    _render(cap2, rotation, fps, frames_data, side, bottom_global, result,
+    _render(cap2, rotation, fps, frames_data, side, reps,
             smooth_hip_ys, knee_ys, valid_frame_indices, str(output_path))
     cap2.release()
 
@@ -119,13 +128,99 @@ def main():
 
 # ── Pass 1: analysis ──────────────────────────────────────────────────────────
 
+def _segment_reps(valid_frames, side):
+    """
+    Segment valid_frames into individual reps using shoulder Y local minima.
+
+    Shoulder Y is LOW when standing (small y value in image coords) and HIGH
+    at the squat bottom. Local minima = standing positions = rep boundaries.
+
+    Returns list of (start_local, end_local) index pairs into valid_frames.
+    Falls back to a single segment covering the whole video if no boundaries found.
+    """
+    shoulder_ys = [f[f"{side}_shoulder"][1] for _, f in valid_frames]
+    smooth = _rolling_average(shoulder_ys, REP_SMOOTHING)
+    n = len(smooth)
+
+    # Find local minima (standing positions)
+    boundary_locals = [0]
+    for i in range(1, n - 1):
+        if smooth[i] <= smooth[i - 1] and smooth[i] <= smooth[i + 1]:
+            boundary_locals.append(i)
+    boundary_locals.append(n)
+
+    # Build segments and filter out those that are too short
+    segments = []
+    for start, end in zip(boundary_locals, boundary_locals[1:]):
+        if end - start >= MIN_REP_FRAMES:
+            segments.append((start, end))
+
+    # Fallback: whole video as one rep
+    if not segments:
+        segments = [(0, n)]
+
+    return segments
+
+
+def _classify_segment(seg_frames, side, frame_height):
+    """
+    Run depth classification on a single rep's frames.
+    Returns dict: {result, bottom_global, start_global, end_global}
+    """
+    if not seg_frames:
+        return None
+
+    hip_key  = f"{side}_hip"
+    knee_key = f"{side}_knee"
+
+    indices  = [i for i, _ in seg_frames]
+    hip_ys   = [f[hip_key][1] for _, f in seg_frames]
+    smooth_h = _rolling_average(hip_ys, SMOOTHING_WINDOW)
+
+    bottom_local = _find_bottom_frame(smooth_h)
+    if bottom_local is None:
+        return None
+    bottom_global = indices[bottom_local]
+
+    def _depth_flag(f):
+        (hc_y, kt_y), _ = _estimated_marker_ys(f, side)
+        return hc_y > kt_y
+
+    depth_flags = [_depth_flag(f) for _, f in seg_frames]
+    max_consec  = _max_consecutive_true(depth_flags)
+
+    gaps = [abs(_estimated_marker_ys(f, side)[0][0] - _estimated_marker_ys(f, side)[0][1])
+            for _, f in seg_frames]
+    min_gap = min(gaps)
+
+    # Reject segments that never approached parallel — not a real rep
+    if min_gap > frame_height * MIN_DESCENT_THRESHOLD:
+        return None
+
+    close = min_gap < (frame_height * CLOSE_THRESHOLD)
+
+    if max_consec >= MIN_DEPTH_FRAMES:
+        result = "pass"
+    elif close:
+        result = "borderline"
+    else:
+        result = "fail"
+
+    return {
+        "result":        result,
+        "bottom_global": bottom_global,
+        "start_global":  indices[0],
+        "end_global":    indices[-1],
+    }
+
+
 def _analyze(cap, rotation, force_side=None):
     """
-    Run landmark extraction + depth judgment.
+    Run landmark extraction + per-rep depth judgment.
 
     Returns:
-        (frames_data, side, bottom_global, result,
-         smooth_hip_ys, knee_ys, valid_frame_indices)
+        (frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices)
+        reps: list of {result, bottom_global, start_global, end_global}
         or None on failure.
     """
     frames_data = _extract_landmarks(cap, rotation)
@@ -142,52 +237,31 @@ def _analyze(cap, rotation, force_side=None):
         return None
 
     hip_key  = f"{side}_hip"
-    knee_key = f"{side}_knee"
+    knee_key = f"{side}_knee"  # used for knee_ys below
 
     valid_frame_indices = [i for i, _ in valid_frames]
     hip_ys  = [f[hip_key][1]  for _, f in valid_frames]
     knee_ys = [f[knee_key][1] for _, f in valid_frames]
     smooth_hip_ys = _rolling_average(hip_ys, SMOOTHING_WINDOW)
 
-    bottom_local = _find_bottom_frame(smooth_hip_ys)
-    if bottom_local is None:
+    frame_height = valid_frames[0][1]["height"]
+
+    segments = _segment_reps(valid_frames, side)
+    reps = []
+    for start_l, end_l in segments:
+        rep = _classify_segment(valid_frames[start_l:end_l], side, frame_height)
+        if rep is not None:
+            reps.append(rep)
+
+    if not reps:
         return None
 
-    bottom_global = valid_frame_indices[bottom_local]
-    bottom_data   = valid_frames[bottom_local][1]
-    hip_y_bottom  = bottom_data[hip_key][1]
-    knee_y_bottom = bottom_data[knee_key][1]
-    frame_height  = bottom_data["height"]
-
-    # Use estimated anatomical markers for depth judgment in the visualizer
-    def _marker_depth_flag(f):
-        (hc_y, kt_y), _ = _estimated_marker_ys(f, side)
-        return hc_y > kt_y
-
-    all_depth_flags = [_marker_depth_flag(f) for _, f in valid_frames]
-    max_consec = _max_consecutive_true(all_depth_flags)
-
-    # Borderline: closest the estimated markers got to each other
-    def _marker_gap(f):
-        (hc_y, kt_y), _ = _estimated_marker_ys(f, side)
-        return abs(hc_y - kt_y)
-
-    min_gap = min(_marker_gap(f) for _, f in valid_frames)
-    close = min_gap < (frame_height * CLOSE_THRESHOLD)
-
-    if max_consec >= MIN_DEPTH_FRAMES:
-        result = "pass"
-    elif close:
-        result = "borderline"
-    else:
-        result = "fail"
-
-    return frames_data, side, bottom_global, result, smooth_hip_ys, knee_ys, valid_frame_indices
+    return frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices
 
 
 # ── Pass 2: rendering ─────────────────────────────────────────────────────────
 
-def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
+def _render(cap, rotation, fps, frames_data, side, reps,
             smooth_hip_ys, knee_ys, valid_frame_indices, output_path):
     """
     Re-read the video frame-by-frame, draw all overlays.
@@ -217,8 +291,17 @@ def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
     # Build global→local index map for graph lookups
     global_to_local = {g: l for l, g in enumerate(valid_frame_indices)}
 
-    trail = deque(maxlen=TRAIL_LEN)          # each entry: ((x, y), depth_active)
-    depth_history = deque(maxlen=TRAIL_LEN)  # parallel bool list
+    trail = deque(maxlen=TRAIL_LEN)   # each entry: ((x, y), depth_active)
+
+    # Precompute set of bottom frames for O(1) lookup
+    bottom_frames = {rep["bottom_global"] for rep in reps}
+
+    def _current_rep(frame_idx):
+        """Return the rep dict whose segment contains frame_idx, or None."""
+        for rep in reps:
+            if rep["start_global"] <= frame_idx <= rep["end_global"]:
+                return rep
+        return None
 
     total = len(frames_data)
     frame_idx = 0
@@ -230,6 +313,7 @@ def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
 
         frame = _rotate_frame(frame, rotation)
         fdata = frames_data[frame_idx] if frame_idx < len(frames_data) else None
+        cur_rep = _current_rep(frame_idx)
 
         if fdata is not None:
             hip_x  = fdata[hip_key][0]
@@ -239,7 +323,7 @@ def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
             (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
             depth_active = hc_y > kt_y
             near_depth   = abs(hc_y - kt_y) < (frame_h * CLOSE_THRESHOLD)
-            is_bottom    = (frame_idx == bottom_global)
+            is_bottom    = frame_idx in bottom_frames
 
             trail.append(((int(hip_x), int(hip_y)), depth_active))
 
@@ -255,11 +339,11 @@ def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
             local_idx = global_to_local.get(frame_idx)
             _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, w, h)
             _draw_hud_text(frame, depth_active, near_depth, is_bottom)
-            _draw_lights(frame, result, frame_idx, bottom_global, total)
+            _draw_lights(frame, cur_rep, frame_idx)
         else:
             # No pose detected — write raw frame, still draw graph if possible
             _draw_graph(frame, smooth_hip_ys, knee_ys, None, w, h)
-            _draw_lights(frame, result, frame_idx, bottom_global, total)
+            _draw_lights(frame, cur_rep, frame_idx)
 
         if SAVE_VIDEO:
             out.write(frame)
@@ -355,26 +439,34 @@ def _draw_hud_text(frame, depth_active, near_depth, is_bottom):
         _draw_label(frame, "BOTTOM", (16, 78), MAGENTA, scale=0.7, thickness=2)
 
 
-def _draw_lights(frame, result, frame_idx, bottom_global, total_frames):
+def _draw_lights(frame, cur_rep, frame_idx):
     """
-    Three judgment lights shown near the end of the lift, to the right of the graph.
+    Three judgment lights shown near the end of each rep's segment.
     White = pass, Red = fail, Yellow = borderline.
-    Only appear once the lifter is in the final quarter of the video after hitting bottom.
+    Appear once we're past 75% through the current rep's segment AND after its bottom.
     """
-    # Show lights only after bottom AND in the last quarter of the video
+    if cur_rep is None:
+        return
+
+    bottom_global = cur_rep["bottom_global"]
+    start_global  = cur_rep["start_global"]
+    end_global    = cur_rep["end_global"]
+    rep_duration  = max(end_global - start_global, 1)
+
+    # Show only after the bottom and past 75% through this rep's segment
     if frame_idx < bottom_global:
         return
-    if frame_idx < total_frames * 0.60:
+    if frame_idx < start_global + rep_duration * 0.75:
         return
 
     fh = frame.shape[0]
     PAD_L, PAD_B = 12, 12
     GW, GH = 300, 100
     graph_x1 = PAD_L + GW
-    graph_y0  = fh - PAD_B - GH   # same top edge as graph
-    graph_y1  = fh - PAD_B        # same bottom edge as graph
+    graph_y0  = fh - PAD_B - GH
+    graph_y1  = fh - PAD_B
 
-    light_color = {"pass": WHITE, "fail": RED, "borderline": YELLOW}.get(result, GRAY)
+    light_color = {"pass": WHITE, "fail": RED, "borderline": YELLOW}.get(cur_rep["result"], GRAY)
     n        = 3
     h_pad    = 12   # horizontal padding inside box
     r        = (GH - 2 * h_pad) // 2   # circles fill the full box height with padding
