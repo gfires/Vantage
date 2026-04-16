@@ -252,10 +252,12 @@ def _render(cap, rotation, fps, frames_data, side, bottom_global, result,
 
             local_idx = global_to_local.get(frame_idx)
             _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, w, h)
-            _draw_hud_text(frame, depth_active, near_depth, is_bottom, result, frame_idx, bottom_global)
+            _draw_hud_text(frame, depth_active, near_depth, is_bottom)
+            _draw_lights(frame, result, frame_idx, bottom_global, total)
         else:
             # No pose detected — write raw frame, still draw graph if possible
             _draw_graph(frame, smooth_hip_ys, knee_ys, None, w, h)
+            _draw_lights(frame, result, frame_idx, bottom_global, total)
 
         if SAVE_VIDEO:
             out.write(frame)
@@ -296,56 +298,45 @@ def _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom):
     hip_crease = (int(hc_x), int(hc_y))
     knee_top   = (int(kt_x), int(kt_y))
 
-    # Depth-state color for the hip→knee segment
+    # Marker line color (only the estimated-point line is color-coded)
     if depth_active:
-        seg_color = GREEN
+        marker_color = GREEN
     elif near_depth:
-        seg_color = YELLOW
+        marker_color = YELLOW
     else:
-        seg_color = WHITE
+        marker_color = WHITE
 
-    # Torso line (shoulder → hip)
+    # Torso line (shoulder → hip) — always gray
     cv2.line(frame, shoulder, hip, GRAY, 2, cv2.LINE_AA)
 
-    # Shin line (knee → heel)
+    # Shin line (knee → heel) — always gray
     cv2.line(frame, knee, heel, GRAY, 2, cv2.LINE_AA)
 
-    # Critical segment: hip → knee
-    cv2.line(frame, hip, knee, seg_color, 3, cv2.LINE_AA)
+    # Hip → knee segment — always gray (depth state shown only on marker line)
+    cv2.line(frame, hip, knee, GRAY, 2, cv2.LINE_AA)
 
-    # Joint circles
-    for pt, color, radius in [
-        (shoulder, GRAY,      6),
-        (knee,     seg_color, 7),
-        (heel,     GRAY,      5),
-        (wrist,    GRAY,      5),
-    ]:
-        cv2.circle(frame, pt, radius, color, -1, cv2.LINE_AA)
-
-    # Hip circle (larger, color-coded)
-    cv2.circle(frame, hip, 8, seg_color, -1, cv2.LINE_AA)
+    # Joint circles — all gray
+    for pt, radius in [(shoulder, 6), (knee, 7), (heel, 5), (wrist, 5), (hip, 8)]:
+        cv2.circle(frame, pt, radius, GRAY, -1, cv2.LINE_AA)
 
     # Bottom frame: magenta ring around hip
     if is_bottom:
         cv2.circle(frame, hip, 18, MAGENTA, 3, cv2.LINE_AA)
 
     # ── Estimated anatomical markers ─────────────────────────────────────────
-    MARKER_COLOR = (60, 60, 60)   # dark dot, easy to distinguish from joints
+    MARKER_DOT = (60, 60, 60)   # dark fill, easy to distinguish from joints
 
-    # Line between the two markers — color-coded same as depth state
-    cv2.line(frame, hip_crease, knee_top, seg_color, 2, cv2.LINE_AA)
+    # Line between the two markers — color-coded by depth state
+    cv2.line(frame, hip_crease, knee_top, marker_color, 2, cv2.LINE_AA)
 
-    cv2.circle(frame, knee_top,   6, MARKER_COLOR, -1, cv2.LINE_AA)
-    cv2.circle(frame, knee_top,   6, WHITE,         1, cv2.LINE_AA)
-    cv2.circle(frame, hip_crease, 6, MARKER_COLOR, -1, cv2.LINE_AA)
-    cv2.circle(frame, hip_crease, 6, WHITE,         1, cv2.LINE_AA)
+    cv2.circle(frame, knee_top,   6, MARKER_DOT,    -1, cv2.LINE_AA)
+    cv2.circle(frame, knee_top,   6, marker_color,   1, cv2.LINE_AA)
+    cv2.circle(frame, hip_crease, 6, MARKER_DOT,    -1, cv2.LINE_AA)
+    cv2.circle(frame, hip_crease, 6, marker_color,   1, cv2.LINE_AA)
 
 
-def _draw_hud_text(frame, depth_active, near_depth, is_bottom, result, frame_idx, bottom_global):
-    """Top-left depth state text + top-right result badge."""
-    h, w = frame.shape[:2]
-
-    # ── Depth state (top-left) ──
+def _draw_hud_text(frame, depth_active, near_depth, is_bottom):
+    """Top-left depth state text."""
     if depth_active:
         label = "DEPTH  +"
         color = GREEN
@@ -361,15 +352,47 @@ def _draw_hud_text(frame, depth_active, near_depth, is_bottom, result, frame_idx
     if is_bottom:
         _draw_label(frame, "BOTTOM", (16, 78), MAGENTA, scale=0.7, thickness=2)
 
-    # ── Overall result (top-right), shown after bottom is known ──
-    if frame_idx >= bottom_global:
-        result_color = {
-            "pass":        GREEN,
-            "fail":        RED,
-            "borderline":  YELLOW,
-            "indeterminate": GRAY,
-        }.get(result, WHITE)
-        _draw_label(frame, result.upper(), (w - 160, 40), result_color, scale=1.0, thickness=2)
+
+def _draw_lights(frame, result, frame_idx, bottom_global, total_frames):
+    """
+    Three judgment lights shown near the end of the lift, to the right of the graph.
+    White = pass, Red = fail, Yellow = borderline.
+    Only appear once the lifter is in the final quarter of the video after hitting bottom.
+    """
+    # Show lights only after bottom AND in the last quarter of the video
+    if frame_idx < bottom_global:
+        return
+    if frame_idx < total_frames * 0.60:
+        return
+
+    fh = frame.shape[0]
+    PAD_L, PAD_B = 12, 12
+    GW, GH = 300, 100
+    graph_x1 = PAD_L + GW
+    graph_y0  = fh - PAD_B - GH   # same top edge as graph
+    graph_y1  = fh - PAD_B        # same bottom edge as graph
+
+    light_color = {"pass": WHITE, "fail": RED, "borderline": YELLOW}.get(result, GRAY)
+    n        = 3
+    h_pad    = 12   # horizontal padding inside box
+    r        = (GH - 2 * h_pad) // 2   # circles fill the full box height with padding
+    gap      = h_pad                    # gap between circles matches padding
+
+    box_x0 = graph_x1          # flush against graph right edge
+    box_x1 = box_x0 + 2 * h_pad + n * (2 * r) + (n - 1) * gap
+    box_y0 = graph_y0
+    box_y1 = graph_y1
+
+    # Black background rectangle — same height as graph
+    bg = frame.copy()
+    cv2.rectangle(bg, (box_x0, box_y0), (box_x1, box_y1), DARK, -1)
+    cv2.addWeighted(bg, 0.85, frame, 0.15, 0, frame)
+
+    # Draw 3 circles centered vertically in the box
+    cy = (box_y0 + box_y1) // 2
+    for i in range(n):
+        cx = box_x0 + h_pad + r + i * (2 * r + gap)
+        cv2.circle(frame, (cx, cy), r, light_color, -1, cv2.LINE_AA)
 
 
 def _draw_trail(frame, trail):
