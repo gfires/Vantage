@@ -1,0 +1,14 @@
+# Videos
+tests/raw_videos/
+tests/annotated_videos/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Models (auto-downloaded)
+models/
+
+# OS
+.DS_Store

@@ -72,10 +72,12 @@ def main():
         idx = args.index("--side")
         force_side = args[idx + 1].lower()
         args = args[:idx] + args[idx + 2:]
-    video_path = args[0] if args else "tests/videos/valid_1.MOV"
+    video_path = args[0] if args else "tests/raw_videos/valid_1.MOV"
 
     path = Path(video_path)
-    output_path = path.parent / (path.stem + "_annotated.mp4")
+    annotated_dir = path.parent.parent / "annotated_videos"
+    annotated_dir.mkdir(exist_ok=True)
+    output_path = annotated_dir / (path.stem + "_annotated.mp4")
 
     print(f"\nInput:  {path}")
     print(f"Output: {output_path}")
