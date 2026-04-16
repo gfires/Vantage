@@ -1,0 +1,23 @@
+{
+  "valid_1.MOV": "pass",
+  "valid_2.MOV": "pass",
+  "valid_3.MOV": "pass",
+  "valid_4.MOV": "pass",
+  "valid_5.MOV": "pass",
+  "valid_6.MOV": "pass",
+  "valid_7.MOV": "pass",
+  "valid_8.MOV": "pass",
+  "valid_9.MOV": "pass",
+  "valid_10.MOV": "pass",
+  "valid_11.MOV": "pass",
+  "valid_12.MOV": "pass",
+  "valid_13.MOV": "pass",
+  "bad_1.MOV": "fail",
+  "bad_2.MOV": "fail",
+  "bad_3.MOV": "fail",
+  "bad_4.MOV": "fail",
+  "bad_5.MOV": "fail",
+  "bad_6.MOV": "fail",
+  "bad_7.MOV": "fail",
+  "bad_8.MOV": "fail"
+}
