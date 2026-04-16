@@ -37,12 +37,14 @@ LEFT_WRIST = 15
 RIGHT_WRIST = 16
 LEFT_SHOULDER = 11
 RIGHT_SHOULDER = 12
+LEFT_HEEL = 29
+RIGHT_HEEL = 30
 
 VISIBILITY_THRESHOLD = 0.7
 DEPTH_WINDOW = 5        # frames around bottom to check for depth condition
 MIN_DEPTH_FRAMES = 3    # consecutive frames where hip_y > knee_y required for pass
 SMOOTHING_WINDOW = 5    # rolling average window to suppress MediaPipe jitter
-CLOSE_THRESHOLD = 0.05  # hip within 5% of frame height from knee = borderline
+CLOSE_THRESHOLD = 0.02  # hip within 2% of frame height from knee = borderline
 
 
 def _ensure_model():
@@ -202,6 +204,8 @@ def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
                     "right_wrist":    (lm[RIGHT_WRIST].x * w,     lm[RIGHT_WRIST].y * h),
                     "left_shoulder":  (lm[LEFT_SHOULDER].x * w,   lm[LEFT_SHOULDER].y * h),
                     "right_shoulder": (lm[RIGHT_SHOULDER].x * w,  lm[RIGHT_SHOULDER].y * h),
+                    "left_heel":      (lm[LEFT_HEEL].x * w,       lm[LEFT_HEEL].y * h),
+                    "right_heel":     (lm[RIGHT_HEEL].x * w,      lm[RIGHT_HEEL].y * h),
                     "width": w,
                     "height": h,
                 })
