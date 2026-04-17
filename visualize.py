@@ -21,6 +21,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from scipy.signal import find_peaks
 
 from depth_detector import (
     _ensure_model,
@@ -49,7 +50,7 @@ TRAIL_LEN    = 60   # frames of hip position history to show
 GRAPH_FRAMES = 90   # frames shown in scrolling graph
 
 # ── Output toggles ────────────────────────────────────────────────────────────
-SAVE_VIDEO  = False   # write annotated MP4 alongside input, then auto-open it
+SAVE_VIDEO  = True   # write annotated MP4 alongside input, then auto-open it
 SHOW_LIVE   = True   # display frames in a cv2 window as they are rendered
 
 # ── Estimated anatomical marker tuning ───────────────────────────────────────
@@ -62,12 +63,12 @@ KNEE_TOP_OVERSHOOT   = 0.18
 HIP_CREASE_FRAC      = 0.88
 
 # ── Rep segmentation tuning ───────────────────────────────────────────────────
-REP_SMOOTHING  = 15   # shoulder Y smoothing window — larger = coarser boundaries
-MIN_REP_FRAMES = 15   # minimum valid frames per rep to count (rejects noise spikes)
-# A segment is only counted as a rep if the estimated markers got within this
-# fraction of frame height from parallel at some point. Rejects hip-hinge
-# warmup/setup movements that never approach depth.
-MIN_DESCENT_THRESHOLD = 0.10  # 10% of frame height above parallel
+REP_SMOOTHING  = 15   # smoothing window for hip-crease height signal
+MIN_REP_FRAMES = 15   # min frames between standing peaks (also min segment length)
+# A segment is only counted as a rep if the hip-crease dropped by at least this
+# fraction of frame height from the standing peak. Rejects hip-hinge warmup
+# movements that never approach squat depth.
+MIN_DESCENT_THRESHOLD = 0.10  # 10% of frame height
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -130,32 +131,71 @@ def main():
 
 def _segment_reps(valid_frames, side):
     """
-    Segment valid_frames into individual reps using shoulder Y local minima.
+    Segment valid_frames into individual reps using hip-crease Y relative to heel Y.
 
-    Shoulder Y is LOW when standing (small y value in image coords) and HIGH
-    at the squat bottom. Local minima = standing positions = rep boundaries.
+    Signal: (heel_y - hip_crease_y) — positive and large when standing tall,
+    small (near zero or negative) at squat bottom. We find peaks of this signal
+    (standing positions) using prominence + distance constraints, then use those
+    peaks as rep boundaries.
+
+    A state-machine confirmation pass rejects segments that never actually
+    descended: the signal must drop by at least MIN_DESCENT_THRESHOLD from the
+    peak into a true valley before the rep boundary is accepted.
 
     Returns list of (start_local, end_local) index pairs into valid_frames.
     Falls back to a single segment covering the whole video if no boundaries found.
     """
-    shoulder_ys = [f[f"{side}_shoulder"][1] for _, f in valid_frames]
-    smooth = _rolling_average(shoulder_ys, REP_SMOOTHING)
+    # Build the height signal: heel_y - hip_crease_y
+    # (larger = standing taller; smaller = deeper squat)
+    height_signal = []
+    for _, f in valid_frames:
+        heel_y = f[f"{side}_heel"][1]
+        (hc_y, _), _ = _estimated_marker_ys(f, side)
+        height_signal.append(heel_y - hc_y)
+
+    smooth = np.array(_rolling_average(height_signal, REP_SMOOTHING))
     n = len(smooth)
 
-    # Find local minima (standing positions)
-    boundary_locals = [0]
-    for i in range(1, n - 1):
-        if smooth[i] <= smooth[i - 1] and smooth[i] <= smooth[i + 1]:
-            boundary_locals.append(i)
-    boundary_locals.append(n)
+    if n < MIN_REP_FRAMES:
+        return [(0, n)]
 
-    # Build segments and filter out those that are too short
+    frame_height = valid_frames[0][1]["height"]
+
+    # Peaks of the height signal = standing positions = rep boundaries.
+    # prominence: must rise at least 8% of frame height from surrounding valley
+    # distance: peaks must be at least MIN_REP_FRAMES apart
+    prominence_threshold = frame_height * 0.08
+    peaks, _ = find_peaks(
+        smooth,
+        prominence=prominence_threshold,
+        distance=MIN_REP_FRAMES,
+    )
+
+    # Wrap detected peaks with sentinel boundaries at start and end so that
+    # the first rep (before the first standing peak) and last rep (after the
+    # last standing peak) are not dropped.
+    if len(peaks) >= 1:
+        boundary_locals = [0] + list(peaks) + [n]
+    else:
+        # No peaks at all — fall back to whole video
+        return [(0, n)]
+
+    # State machine confirmation: for each candidate boundary pair, verify the
+    # signal actually descended by at least MIN_DESCENT_THRESHOLD somewhere
+    # inside the segment. Uses the segment's own max as the standing reference
+    # so edge segments (which start at sentinel 0, not a real peak) are judged
+    # fairly.
+    descent_threshold = frame_height * MIN_DESCENT_THRESHOLD
     segments = []
     for start, end in zip(boundary_locals, boundary_locals[1:]):
-        if end - start >= MIN_REP_FRAMES:
+        if end - start < MIN_REP_FRAMES:
+            continue
+        seg = smooth[start:end]
+        peak_val = float(seg.max())
+        valley_val = float(seg.min())
+        if (peak_val - valley_val) >= descent_threshold:
             segments.append((start, end))
 
-    # Fallback: whole video as one rep
     if not segments:
         segments = [(0, n)]
 
@@ -297,11 +337,11 @@ def _render(cap, rotation, fps, frames_data, side, reps,
     bottom_frames = {rep["bottom_global"] for rep in reps}
 
     def _current_rep(frame_idx):
-        """Return the rep dict whose segment contains frame_idx, or None."""
-        for rep in reps:
+        """Return (rep_index_1based, rep dict) for the rep containing frame_idx, or (None, None)."""
+        for idx, rep in enumerate(reps, 1):
             if rep["start_global"] <= frame_idx <= rep["end_global"]:
-                return rep
-        return None
+                return idx, rep
+        return None, None
 
     total = len(frames_data)
     frame_idx = 0
@@ -313,8 +353,18 @@ def _render(cap, rotation, fps, frames_data, side, reps,
 
         frame = _rotate_frame(frame, rotation)
         fdata = frames_data[frame_idx] if frame_idx < len(frames_data) else None
-        cur_rep = _current_rep(frame_idx)
+        rep_num, cur_rep = _current_rep(frame_idx)
 
+        local_idx = global_to_local.get(frame_idx)
+
+        # Pass 1: dark backing rects only onto overlay, then one blend.
+        overlay = frame.copy()
+        _draw_backgrounds(overlay, frame.shape[1], h,
+                          rep_num, len(reps),
+                          fdata, side)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+
+        # Pass 2: all opaque content directly onto the blended frame.
         if fdata is not None:
             hip_x  = fdata[hip_key][0]
             hip_y  = fdata[hip_key][1]
@@ -327,23 +377,16 @@ def _render(cap, rotation, fps, frames_data, side, reps,
 
             trail.append(((int(hip_x), int(hip_y)), depth_active))
 
-            # ── Draw overlays onto an overlay copy for alpha blending ──
-            overlay = frame.copy()
-
-            _draw_trail(overlay, trail)
-            _draw_skeleton(overlay, fdata, side, depth_active, near_depth, is_bottom)
-
-            # blend overlay with original
-            cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-
-            local_idx = global_to_local.get(frame_idx)
-            _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, w, h)
+            _draw_trail(frame, trail)
+            _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom)
+            _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, h)
             _draw_hud_text(frame, depth_active, near_depth, is_bottom)
-            _draw_lights(frame, cur_rep, frame_idx)
+            _draw_lights(frame, cur_rep, frame_idx, h)
+            _draw_rep_counter(frame, rep_num, len(reps), frame.shape[1], h)
         else:
-            # No pose detected — write raw frame, still draw graph if possible
-            _draw_graph(frame, smooth_hip_ys, knee_ys, None, w, h)
-            _draw_lights(frame, cur_rep, frame_idx)
+            _draw_graph(frame, smooth_hip_ys, knee_ys, None, h)
+            _draw_lights(frame, cur_rep, frame_idx, h)
+            _draw_rep_counter(frame, rep_num, len(reps), frame.shape[1], h)
 
         if SAVE_VIDEO:
             out.write(frame)
@@ -421,72 +464,105 @@ def _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom):
     cv2.circle(frame, hip_crease, 6, marker_color,   1, cv2.LINE_AA)
 
 
+def _lights_box_coords(frame_h):
+    """Return (box_x0, box_x1, box_y0, box_y1, r, h_pad, gap) for the lights box."""
+    PAD_L, PAD_B = 12, 12
+    GW, GH = 300, 100
+    n, h_pad, gap = 3, 12, 12
+    r = (GH - 2 * h_pad) // 2
+    box_x0 = PAD_L + GW
+    box_x1 = box_x0 + 2 * h_pad + n * (2 * r) + (n - 1) * gap
+    box_y0 = frame_h - PAD_B - GH
+    box_y1 = frame_h - PAD_B
+    return box_x0, box_x1, box_y0, box_y1, r, h_pad, gap
+
+
+def _rep_counter_coords(frame_w, frame_h, rep_num, total_reps):
+    """Return (x, y, tw, th, baseline, label) for the rep counter text."""
+    label = f"REP {rep_num}/{total_reps}" if total_reps > 1 else f"REP {rep_num}"
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thickness = 0.7, 2
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+    PAD = 12
+    x = frame_w - tw - PAD
+    y = frame_h - PAD
+    return x, y, tw, th, baseline, label
+
+
+def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, fdata, side):
+    """
+    Paint all semi-transparent dark backing rects onto overlay.
+    Called once per frame before the single addWeighted blend.
+    No opaque content (circles, text, lines) here.
+    """
+    PAD_L, PAD_B = 12, 12
+    GW, GH = 300, 100
+
+    # Graph panel background
+    cv2.rectangle(overlay, (PAD_L, frame_h - PAD_B - GH),
+                  (PAD_L + GW, frame_h - PAD_B), DARK, -1)
+
+    # Lights box background
+    box_x0, box_x1, box_y0, box_y1, _, _, _ = _lights_box_coords(frame_h)
+    cv2.rectangle(overlay, (box_x0, box_y0), (box_x1, box_y1), DARK, -1)
+
+    # Rep counter background
+    if rep_num is not None:
+        x, y, tw, th, baseline, _ = _rep_counter_coords(frame_w, frame_h, rep_num, total_reps)
+        cv2.rectangle(overlay, (x - 6, y - th - 6), (x + tw + 6, y + baseline + 6), DARK, -1)
+
+    # HUD text background
+    if fdata is not None:
+        hip_key = f"{side}_hip"
+        hc_y = fdata[f"{side}_shoulder"][1] + (fdata[hip_key][1] - fdata[f"{side}_shoulder"][1]) * HIP_CREASE_FRAC
+        kt_y = fdata[f"{side}_heel"][1] + (fdata[f"{side}_knee"][1] - fdata[f"{side}_heel"][1]) * (1.0 + KNEE_TOP_OVERSHOOT)
+        depth_active = hc_y > kt_y
+        near_depth   = abs(hc_y - kt_y) < (fdata["height"] * CLOSE_THRESHOLD)
+        label = "DEPTH  +" if depth_active else ("BORDERLINE" if near_depth else "NO DEPTH")
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
+        cv2.rectangle(overlay, (12, 12), (12 + tw + 8, 12 + th + baseline + 8), DARK, -1)
+
+
 def _draw_hud_text(frame, depth_active, near_depth, is_bottom):
-    """Top-left depth state text."""
+    """Top-left depth state text — opaque, drawn after the background blend."""
     if depth_active:
-        label = "DEPTH  +"
-        color = GREEN
+        label, color = "DEPTH  +", GREEN
     elif near_depth:
-        label = "BORDERLINE"
-        color = YELLOW
+        label, color = "BORDERLINE", YELLOW
     else:
-        label = "NO DEPTH"
-        color = WHITE
-
-    _draw_label(frame, label, (16, 40), color, scale=1.0, thickness=2)
-
+        label, color = "NO DEPTH", WHITE
+    cv2.putText(frame, label, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA)
     if is_bottom:
-        _draw_label(frame, "BOTTOM", (16, 78), MAGENTA, scale=0.7, thickness=2)
+        cv2.putText(frame, "BOTTOM", (16, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.7, MAGENTA, 2, cv2.LINE_AA)
 
 
-def _draw_lights(frame, cur_rep, frame_idx):
-    """
-    Three judgment lights shown near the end of each rep's segment.
-    White = pass, Red = fail, Yellow = borderline.
-    Appear once we're past 75% through the current rep's segment AND after its bottom.
-    """
+def _draw_lights(frame, cur_rep, frame_idx, frame_h):
+    """Judgment circles — drawn after blend so they appear at full brightness."""
     if cur_rep is None:
         return
-
     bottom_global = cur_rep["bottom_global"]
     start_global  = cur_rep["start_global"]
     end_global    = cur_rep["end_global"]
     rep_duration  = max(end_global - start_global, 1)
-
-    # Show only after the bottom and past 75% through this rep's segment
     if frame_idx < bottom_global:
         return
     if frame_idx < start_global + rep_duration * 0.75:
         return
 
-    fh = frame.shape[0]
-    PAD_L, PAD_B = 12, 12
-    GW, GH = 300, 100
-    graph_x1 = PAD_L + GW
-    graph_y0  = fh - PAD_B - GH
-    graph_y1  = fh - PAD_B
-
+    box_x0, box_x1, box_y0, box_y1, r, h_pad, gap = _lights_box_coords(frame_h)
     light_color = {"pass": WHITE, "fail": RED, "borderline": YELLOW}.get(cur_rep["result"], GRAY)
-    n        = 3
-    h_pad    = 12   # horizontal padding inside box
-    r        = (GH - 2 * h_pad) // 2   # circles fill the full box height with padding
-    gap      = h_pad                    # gap between circles matches padding
-
-    box_x0 = graph_x1          # flush against graph right edge
-    box_x1 = box_x0 + 2 * h_pad + n * (2 * r) + (n - 1) * gap
-    box_y0 = graph_y0
-    box_y1 = graph_y1
-
-    # Black background rectangle — same height as graph
-    bg = frame.copy()
-    cv2.rectangle(bg, (box_x0, box_y0), (box_x1, box_y1), DARK, -1)
-    cv2.addWeighted(bg, 0.85, frame, 0.15, 0, frame)
-
-    # Draw 3 circles centered vertically in the box
     cy = (box_y0 + box_y1) // 2
-    for i in range(n):
+    for i in range(3):
         cx = box_x0 + h_pad + r + i * (2 * r + gap)
         cv2.circle(frame, (cx, cy), r, light_color, -1, cv2.LINE_AA)
+
+
+def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
+    """Rep counter text — drawn after blend at full brightness."""
+    if rep_num is None:
+        return
+    x, y, _, _, _, label = _rep_counter_coords(frame_w, frame_h, rep_num, total_reps)
+    cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2, cv2.LINE_AA)
 
 
 def _draw_trail(frame, trail):
@@ -504,25 +580,20 @@ def _draw_trail(frame, trail):
         cv2.circle(frame, (x, y), radius, dimmed, -1, cv2.LINE_AA)
 
 
-def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_w, frame_h):
+def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_h):
     """
     Bottom-left scrolling line chart: hip_y (white) vs knee_y (yellow).
-    Green fill between curves when hip_y > knee_y.
+    Green fill drawn with a single fillPoly call — no per-segment frame copy.
+    Background rect is handled by _draw_backgrounds before the blend.
     """
     PAD_L, PAD_B = 12, 12
-    GW, GH = 300, 100   # panel width, height
+    GW, GH = 300, 100
     x0 = PAD_L
     y0 = frame_h - PAD_B - GH
-
-    # Semi-transparent dark background
-    bg = frame.copy()
-    cv2.rectangle(bg, (x0, y0), (x0 + GW, y0 + GH), DARK, -1)
-    cv2.addWeighted(bg, 0.6, frame, 0.4, 0, frame)
 
     if current_local is None or len(smooth_hip_ys) < 2:
         return
 
-    # Window of frames to display
     end_local   = current_local + 1
     start_local = max(0, end_local - GRAPH_FRAMES)
     hip_slice   = smooth_hip_ys[start_local:end_local]
@@ -536,47 +607,32 @@ def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_w, frame_h):
     y_range = max(y_max - y_min, 1.0)
 
     def to_px(val):
-        norm = (val - y_min) / y_range           # 0=top of data, 1=bottom
-        # In image coords, larger y = lower on screen; squat goes down = larger y
-        # We want "deeper" (larger hip_y) to appear lower in the graph panel too
-        gy = y0 + int(norm * (GH - 4)) + 2
-        return gy
+        return y0 + int((val - y_min) / y_range * (GH - 4)) + 2
 
     n = len(hip_slice)
     def to_gx(i):
         return x0 + 2 + int(i / max(n - 1, 1) * (GW - 4))
 
-    # Build point lists
     hip_pts  = [(to_gx(i), to_px(v)) for i, v in enumerate(hip_slice)]
     knee_pts = [(to_gx(i), to_px(v)) for i, v in enumerate(knee_slice)]
 
-    # Green fill where hip_y > knee_y (depth active)
-    for i in range(n - 1):
-        h1, h2 = hip_pts[i][1],  hip_pts[i + 1][1]
-        k1, k2 = knee_pts[i][1], knee_pts[i + 1][1]
-        if hip_slice[i] > knee_slice[i] or hip_slice[i + 1] > knee_slice[i + 1]:
-            pts = np.array([
-                hip_pts[i], hip_pts[i + 1],
-                knee_pts[i + 1], knee_pts[i],
-            ], dtype=np.int32)
-            fill_layer = frame.copy()
-            cv2.fillPoly(fill_layer, [pts], (0, 100, 30))
-            cv2.addWeighted(fill_layer, 0.4, frame, 0.6, 0, frame)
+    # Single fillPoly for all depth-active regions
+    fill_polys = [
+        np.array([hip_pts[i], hip_pts[i+1], knee_pts[i+1], knee_pts[i]], dtype=np.int32)
+        for i in range(n - 1)
+        if hip_slice[i] > knee_slice[i] or hip_slice[i+1] > knee_slice[i+1]
+    ]
+    if fill_polys:
+        cv2.fillPoly(frame, fill_polys, (0, 180, 40))
 
-    # Draw knee_y (yellow dashed)
     for i in range(n - 1):
-        if i % 4 < 2:  # simple dash: draw every other segment
+        if i % 4 < 2:
             cv2.line(frame, knee_pts[i], knee_pts[i + 1], YELLOW, 1, cv2.LINE_AA)
-
-    # Draw hip_y (white solid)
     for i in range(n - 1):
         cv2.line(frame, hip_pts[i], hip_pts[i + 1], WHITE, 1, cv2.LINE_AA)
 
-    # Vertical cursor at current frame (right edge)
     cx = to_gx(n - 1)
     cv2.line(frame, (cx, y0 + 2), (cx, y0 + GH - 2), GREEN, 1, cv2.LINE_AA)
-
-    # Panel border
     cv2.rectangle(frame, (x0, y0), (x0 + GW, y0 + GH), GRAY, 1)
 
 
@@ -607,17 +663,6 @@ def _estimated_marker_ys(fdata, side) -> tuple:
 
     return (hc_y, kt_y), (hc_x, kt_x)
 
-
-def _draw_label(frame, text, origin, color, scale=0.8, thickness=2):
-    """Draw text with a dark semi-transparent background for readability."""
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
-    x, y = origin
-    pad = 4
-    bg = frame.copy()
-    cv2.rectangle(bg, (x - pad, y - th - pad), (x + tw + pad, y + baseline + pad), DARK, -1)
-    cv2.addWeighted(bg, 0.55, frame, 0.45, 0, frame)
-    cv2.putText(frame, text, (x, y), font, scale, color, thickness, cv2.LINE_AA)
 
 
 def _max_consecutive_true(flags):
