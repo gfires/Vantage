@@ -16,7 +16,6 @@ Usage:
 
 import subprocess
 import sys
-from collections import deque
 from pathlib import Path
 
 import cv2
@@ -46,7 +45,6 @@ RED     = (60, 60, 220)
 DARK    = (20, 20, 20)
 GRAY    = (160, 160, 160)
 
-TRAIL_LEN    = 60   # frames of hip position history to show
 GRAPH_FRAMES = 90   # frames shown in scrolling graph
 
 # ── Output toggles ────────────────────────────────────────────────────────────
@@ -61,6 +59,10 @@ KNEE_TOP_OVERSHOOT   = 0.18
 # Hip-crease marker: shoulder→hip vector, this fraction of the way from shoulder.
 # 0.90 = 90% along shoulder→hip (i.e. 10% above the hip joint center).
 HIP_CREASE_FRAC      = 0.88
+
+# ── Drawing smoothing ─────────────────────────────────────────────────────────
+DRAW_SMOOTHING = 3    # rolling average window for skeleton/marker drawing coords only
+                      # does NOT affect depth classification — display only
 
 # ── Rep segmentation tuning ───────────────────────────────────────────────────
 REP_SMOOTHING  = 15   # smoothing window for hip-crease height signal
@@ -112,7 +114,7 @@ def main():
         print("ERROR: Could not detect pose or squat bottom. Check camera angle.")
         sys.exit(1)
 
-    frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
+    frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
 
     for i, rep in enumerate(reps, 1):
         print(f"  Rep {i}: {rep['result'].upper():12} (bottom frame {rep['bottom_global']})")
@@ -120,7 +122,7 @@ def main():
 
     cap2 = cv2.VideoCapture(str(path))
     cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)  # prevent double-rotate on macOS
-    _render(cap2, rotation, fps, frames_data, side, reps,
+    _render(cap2, rotation, fps, frames_data, draw_frames, side, reps,
             smooth_hip_ys, knee_ys, valid_frame_indices, str(output_path))
     cap2.release()
 
@@ -254,12 +256,55 @@ def _classify_segment(seg_frames, side, frame_height):
     }
 
 
+def _smooth_landmarks_for_drawing(frames_data):
+    """
+    Return a parallel list to frames_data with x/y coordinates smoothed by
+    DRAW_SMOOTHING frames for display only. None entries are preserved.
+    Visibility scores are copied from the original (not smoothed).
+    Classification logic always uses frames_data, never draw_frames.
+    """
+    joints_xy = [
+        "left_hip", "right_hip", "left_knee", "right_knee",
+        "left_shoulder", "right_shoulder", "left_heel", "right_heel",
+        "left_wrist", "right_wrist",
+    ]
+    # Joints that carry a visibility third element
+    joints_vis = {"left_hip", "right_hip", "left_knee", "right_knee"}
+
+    # Build per-joint x/y arrays (None frames contribute NaN so edges stay clean)
+    coords = {}
+    for j in joints_xy:
+        xs = [f[j][0] if f is not None else float("nan") for f in frames_data]
+        ys = [f[j][1] if f is not None else float("nan") for f in frames_data]
+        coords[j] = (
+            _rolling_average(xs, DRAW_SMOOTHING),
+            _rolling_average(ys, DRAW_SMOOTHING),
+        )
+
+    draw_frames = []
+    for i, f in enumerate(frames_data):
+        if f is None:
+            draw_frames.append(None)
+            continue
+        df = dict(f)  # shallow copy — width/height/frame_idx unchanged
+        for j in joints_xy:
+            sx, sy = coords[j][0][i], coords[j][1][i]
+            if j in joints_vis:
+                df[j] = (sx, sy, f[j][2])   # preserve visibility
+            else:
+                df[j] = (sx, sy)
+        draw_frames.append(df)
+
+    return draw_frames
+
+
 def _analyze(cap, rotation, force_side=None):
     """
     Run landmark extraction + per-rep depth judgment.
 
     Returns:
-        (frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices)
+        (frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices)
+        draw_frames: smoothed copy of frames_data for skeleton/marker rendering only.
         reps: list of {result, bottom_global, start_global, end_global}
         or None on failure.
     """
@@ -296,12 +341,14 @@ def _analyze(cap, rotation, force_side=None):
     if not reps:
         return None
 
-    return frames_data, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices
+    draw_frames = _smooth_landmarks_for_drawing(frames_data)
+
+    return frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices
 
 
 # ── Pass 2: rendering ─────────────────────────────────────────────────────────
 
-def _render(cap, rotation, fps, frames_data, side, reps,
+def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
             smooth_hip_ys, knee_ys, valid_frame_indices, output_path):
     """
     Re-read the video frame-by-frame, draw all overlays.
@@ -326,12 +373,8 @@ def _render(cap, rotation, fps, frames_data, side, reps,
 
     delay_ms = max(1, int(1000 / fps))  # for SHOW_LIVE playback pacing
 
-    hip_key = f"{side}_hip"
-
     # Build global→local index map for graph lookups
     global_to_local = {g: l for l, g in enumerate(valid_frame_indices)}
-
-    trail = deque(maxlen=TRAIL_LEN)   # each entry: ((x, y), depth_active)
 
     # Precompute set of bottom frames for O(1) lookup
     bottom_frames = {rep["bottom_global"] for rep in reps}
@@ -352,7 +395,8 @@ def _render(cap, rotation, fps, frames_data, side, reps,
             break
 
         frame = _rotate_frame(frame, rotation)
-        fdata = frames_data[frame_idx] if frame_idx < len(frames_data) else None
+        fdata      = frames_data[frame_idx] if frame_idx < len(frames_data) else None
+        fdata_draw = draw_frames[frame_idx]  if frame_idx < len(draw_frames)  else None
         rep_num, cur_rep = _current_rep(frame_idx)
 
         local_idx = global_to_local.get(frame_idx)
@@ -365,9 +409,9 @@ def _render(cap, rotation, fps, frames_data, side, reps,
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
         # Pass 2: all opaque content directly onto the blended frame.
+        # fdata      → depth state logic (unsmoothed, authoritative)
+        # fdata_draw → skeleton/trail/markers (smoothed, display only)
         if fdata is not None:
-            hip_x  = fdata[hip_key][0]
-            hip_y  = fdata[hip_key][1]
             frame_h = fdata["height"]
 
             (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
@@ -375,10 +419,7 @@ def _render(cap, rotation, fps, frames_data, side, reps,
             near_depth   = abs(hc_y - kt_y) < (frame_h * CLOSE_THRESHOLD)
             is_bottom    = frame_idx in bottom_frames
 
-            trail.append(((int(hip_x), int(hip_y)), depth_active))
-
-            _draw_trail(frame, trail)
-            _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom)
+            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth)
             _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, h)
             _draw_hud_text(frame, depth_active, near_depth, is_bottom)
             _draw_lights(frame, cur_rep, frame_idx, h)
@@ -415,7 +456,7 @@ def _render(cap, rotation, fps, frames_data, side, reps,
 
 # ── Drawing helpers ───────────────────────────────────────────────────────────
 
-def _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom):
+def _draw_skeleton(frame, fdata, side, depth_active, near_depth):
     """Draw joint connections and circles for the selected side."""
     hip      = _pt(fdata[f"{side}_hip"])
     knee     = _pt(fdata[f"{side}_knee"])
@@ -447,10 +488,6 @@ def _draw_skeleton(frame, fdata, side, depth_active, near_depth, is_bottom):
     # Joint circles — all gray
     for pt, radius in [(shoulder, 6), (knee, 7), (heel, 5), (wrist, 5), (hip, 8)]:
         cv2.circle(frame, pt, radius, GRAY, -1, cv2.LINE_AA)
-
-    # Bottom frame: magenta ring around hip
-    if is_bottom:
-        cv2.circle(frame, hip, 18, MAGENTA, 3, cv2.LINE_AA)
 
     # ── Estimated anatomical markers ─────────────────────────────────────────
     MARKER_DOT = (60, 60, 60)   # dark fill, easy to distinguish from joints
@@ -564,20 +601,6 @@ def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
     x, y, _, _, _, label = _rep_counter_coords(frame_w, frame_h, rep_num, total_reps)
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2, cv2.LINE_AA)
 
-
-def _draw_trail(frame, trail):
-    """Draw fading hip position trail. Older dots are smaller and dimmer."""
-    n = len(trail)
-    for i, ((x, y), depth_active) in enumerate(trail):
-        age_ratio = i / max(n - 1, 1)       # 0 = oldest, 1 = newest
-        radius = max(2, int(2 + age_ratio * 6))
-        alpha  = 0.15 + 0.85 * age_ratio    # fade older dots
-
-        color = GREEN if depth_active else WHITE
-        # Dim color by alpha (blend toward black)
-        dimmed = tuple(int(c * alpha) for c in color)
-
-        cv2.circle(frame, (x, y), radius, dimmed, -1, cv2.LINE_AA)
 
 
 def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_h):

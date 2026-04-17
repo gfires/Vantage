@@ -12,7 +12,7 @@ Built for the Rice powerlifting team.
 |---|---|
 | Pose estimation | MediaPipe BlazePose Tasks API (`mediapipe >= 0.10`) — `pose_landmarker_full.task` |
 | Video I/O | OpenCV (`opencv-python >= 4.8`) |
-| Numerical ops | NumPy |
+| Numerical ops | NumPy, SciPy (`find_peaks` for rep segmentation) |
 | Runtime | Python 3.12 (`/usr/local/bin/python3.12`) |
 | Future UI | Streamlit (in requirements, not yet built) |
 | Future AI | Anthropic SDK (in requirements, not yet built) |
@@ -82,23 +82,38 @@ Checked across the entire video (not just a window around the detected bottom), 
 
 ### Rep segmentation (`visualize.py`)
 
-Uses **shoulder Y** (not hip Y) as the segmentation signal. Shoulder Y is low when standing, high at squat bottom — its local minima are standing positions between reps.
+Uses **hip-crease Y relative to heel Y** as the segmentation signal. This normalizes for the lifter's position in frame and uses the same anatomical marker that drives depth detection.
 
-1. Extract per-frame shoulder Y for the tracked side
-2. Smooth with `REP_SMOOTHING = 15` frame rolling average
-3. Find local minima → rep boundary indices
-4. Reject segments shorter than `MIN_REP_FRAMES = 15` frames (noise)
-5. Reject segments where the estimated markers never got within `MIN_DESCENT_THRESHOLD = 0.10` (10% of frame height) of parallel — eliminates hip-hinge warmup movements that look like a rep boundary but aren't real squats
-6. Fallback: entire video as one rep if no boundaries found
+Signal: `heel_y − hip_crease_y` — large when standing tall, small at squat bottom.
+
+1. Smooth with `REP_SMOOTHING = 15` frame rolling average
+2. Find peaks of the smoothed signal (standing positions) using `scipy.signal.find_peaks` with:
+   - `prominence ≥ 8% of frame height` — rejects noise and partial movements
+   - `distance ≥ MIN_REP_FRAMES` — enforces minimum spacing between reps
+3. Wrap detected peaks with sentinel boundaries `[0, peaks..., n]` so the first and last reps are not dropped
+4. State machine confirmation: each candidate segment must show a descent of at least `MIN_DESCENT_THRESHOLD = 0.10` (10% of frame height) from its standing peak to its valley — rejects hip-hinge setup movements
+5. Fallback: entire video as one rep if no peaks found
 
 Each valid segment is classified independently using `_classify_segment()`.
 
+### Drawing smoothing
+
+Raw MediaPipe landmarks jitter slightly frame-to-frame even during still positions. To eliminate this visually without affecting classification accuracy, a separate `draw_frames` list is computed during analysis:
+
+- Each joint's x/y is smoothed with a `DRAW_SMOOTHING = 3` frame rolling average
+- `draw_frames` is used exclusively for skeleton and marker rendering
+- `frames_data` (unsmoothed) is used exclusively for depth classification and depth state logic
+
 ### Two-pass rendering
 
-Pass 1 (analysis): open video, extract all landmarks, segment reps, classify each.
+Pass 1 (analysis): open video, extract all landmarks, build `frames_data` and `draw_frames`, segment reps, classify each.
 Pass 2 (render): re-open video, iterate frames, draw overlays, write output.
 
 Avoids holding all raw frames in RAM. Trade-off: video is decoded twice.
+
+### Render loop: single overlay blend
+
+All semi-transparent dark backing rects (graph panel, lights box, rep counter, HUD label) are drawn onto a single `overlay = frame.copy()` per frame, then blended once with `cv2.addWeighted`. All opaque content (skeleton, graph lines, circles, text) is drawn directly onto the post-blend frame. This reduces per-frame `frame.copy()` calls from ~90 to 1.
 
 ---
 
@@ -108,11 +123,10 @@ Avoids holding all raw frames in RAM. Trade-off: video is decoded twice.
 |---|---|
 | Skeleton | Gray lines: shoulder→hip, hip→knee, knee→heel. Gray dots at all joints. |
 | Estimated marker line | Colored line between hip-crease and knee-top markers. **Green** = depth active, **Yellow** = borderline, **White** = above parallel. This line (not the skeleton) drives the depth color. |
-| Hip trail | Last 60 hip positions as fading dots. Green when depth was active at that frame. |
-| Magenta ring | Appears around the hip joint on the detected bottom frame of each rep. |
-| Depth HUD (top-left) | "DEPTH +" / "BORDERLINE" / "NO DEPTH" text label. |
+| Depth HUD (top-left) | "DEPTH +" / "BORDERLINE" / "NO DEPTH" text label. "BOTTOM" label appears at the detected hole frame. |
 | Graph HUD (bottom-left) | 300×100px scrolling chart of smoothed hip_y (white) vs knee_y (yellow dashed) over last 90 frames. Green fill where depth is active. |
-| Lights box (right of graph) | Always-visible dark box, same height as graph. Shows "REP N/M" counter bottom-right. After 75% of a rep's segment (post-bottom): 3 large circles appear — **white** = pass, **red** = fail, **yellow** = borderline. |
+| Lights box (right of graph) | Always-visible dark box. Three large circles appear after the bottom and past 75% of rep duration — **white** = pass, **red** = fail, **yellow** = borderline. |
+| Rep counter (bottom-right) | "REP N/M" displayed independently of the lights box. |
 
 ### Output toggles (top of visualize.py)
 
@@ -126,9 +140,10 @@ SHOW_LIVE  = True    # display in cv2.imshow() window while rendering
 ```python
 KNEE_TOP_OVERSHOOT    = 0.18   # how far past knee joint the knee-top marker sits
 HIP_CREASE_FRAC       = 0.88   # how far down shoulder→hip the crease marker sits
-REP_SMOOTHING         = 15     # shoulder Y smoothing window for rep boundaries
-MIN_REP_FRAMES        = 15     # min frames for a segment to count as a rep
-MIN_DESCENT_THRESHOLD = 0.10   # min proximity to parallel to count as a real rep
+DRAW_SMOOTHING        = 3      # rolling average window for skeleton drawing coords (display only)
+REP_SMOOTHING         = 15     # hip-crease height signal smoothing window for rep boundaries
+MIN_REP_FRAMES        = 15     # min frames between standing peaks / min segment length
+MIN_DESCENT_THRESHOLD = 0.10   # min drop from standing peak to valley to count as a rep
 ```
 
 Detection constants live in `depth_detector.py`:
@@ -138,6 +153,24 @@ CLOSE_THRESHOLD   = 0.02  # within 2% of frame height = borderline
 SMOOTHING_WINDOW  = 5     # hip Y rolling average for bottom detection
 VISIBILITY_THRESHOLD = 0.7
 ```
+
+---
+
+## Performance Profile
+
+Measured on 1920×1080 @ 28fps video (Apple M3):
+
+| Phase | Cost |
+|---|---|
+| MediaPipe landmark extraction | ~21.8ms/frame (dominant cost, CPU-bound) |
+| Render loop total | ~10.8ms/frame |
+| — VideoWriter encode | ~4.1ms/frame |
+| — Decode (pass 2) | ~3.1ms/frame |
+| — Rotate | ~2.1ms/frame |
+| — Overlay blend | ~1.5ms/frame |
+| — All drawing combined | ~0.3ms/frame |
+
+Real-time budget at 28fps is 36ms/frame. The render loop is well within budget; MediaPipe is the ceiling.
 
 ---
 
@@ -166,4 +199,4 @@ Output always goes to `tests/annotated_videos/<stem>_annotated.mp4`.
 - `app.py` — Streamlit UI (upload → analyze → display results)
 - Claude AI coaching breakdown (Anthropic SDK is in requirements, not wired)
 - Multi-rep support in `depth_detector.py`'s `analyze_video()` — it's still single-rep; multi-rep logic lives only in `visualize.py`
-- Performance optimization — MediaPipe extraction runs ~24ms/frame sequentially; for longer sets this adds up
+- GPU inference — MediaPipe BlazePose supports CoreML/GPU delegates; would reduce extraction from ~21.8ms to ~2–5ms/frame, ~2× overall pipeline speedup
