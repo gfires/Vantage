@@ -20,6 +20,13 @@ import numpy as np
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
+from params import (
+    VISIBILITY_THRESHOLD,
+    MIN_DEPTH_FRAMES,
+    SMOOTHING_WINDOW,
+    CLOSE_THRESHOLD,
+)
+
 # Model auto-download
 MODEL_DIR = Path(__file__).parent / "models"
 MODEL_PATH = MODEL_DIR / "pose_landmarker_full.task"
@@ -39,12 +46,6 @@ LEFT_SHOULDER = 11
 RIGHT_SHOULDER = 12
 LEFT_HEEL = 29
 RIGHT_HEEL = 30
-
-VISIBILITY_THRESHOLD = 0.7
-DEPTH_WINDOW = 5        # frames around bottom to check for depth condition
-MIN_DEPTH_FRAMES = 3    # consecutive frames where hip_y > knee_y required for pass
-SMOOTHING_WINDOW = 5    # rolling average window to suppress MediaPipe jitter
-CLOSE_THRESHOLD = 0.02  # hip within 2% of frame height from knee = borderline
 
 
 def _ensure_model():

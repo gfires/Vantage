@@ -30,11 +30,20 @@ from depth_detector import (
     _select_side,
     _rolling_average,
     _find_bottom_frame,
+)
+from params import (
     CLOSE_THRESHOLD,
-    DEPTH_WINDOW,
     MIN_DEPTH_FRAMES,
     SMOOTHING_WINDOW,
+    KNEE_TOP_OVERSHOOT,
+    HIP_CREASE_FRAC,
+    REP_SMOOTHING,
+    MIN_REP_FRAMES,
+    MIN_DESCENT_THRESHOLD,
+    DRAW_SMOOTHING,
+    TIBIAL_WARN_DEG,
 )
+from metrics import compute_tempo, compute_tibial_angle
 
 # ── Colors (BGR) ──────────────────────────────────────────────────────────────
 WHITE   = (255, 255, 255)
@@ -47,30 +56,12 @@ GRAY    = (160, 160, 160)
 
 GRAPH_FRAMES = 90   # frames shown in scrolling graph
 
+CYAN = (200, 200, 0)   # BGR cyan for tibial angle line and bar path trail
+
 # ── Output toggles ────────────────────────────────────────────────────────────
 SAVE_VIDEO  = True   # write annotated MP4 alongside input, then auto-open it
 SHOW_LIVE   = True   # display frames in a cv2 window as they are rendered
 
-# ── Estimated anatomical marker tuning ───────────────────────────────────────
-# Knee-top marker: heel→knee vector, extended this fraction *past* the knee.
-# 0.10 = 10% of heel-to-knee distance above the knee joint center.
-KNEE_TOP_OVERSHOOT   = 0.18
-
-# Hip-crease marker: shoulder→hip vector, this fraction of the way from shoulder.
-# 0.90 = 90% along shoulder→hip (i.e. 10% above the hip joint center).
-HIP_CREASE_FRAC      = 0.88
-
-# ── Drawing smoothing ─────────────────────────────────────────────────────────
-DRAW_SMOOTHING = 3    # rolling average window for skeleton/marker drawing coords only
-                      # does NOT affect depth classification — display only
-
-# ── Rep segmentation tuning ───────────────────────────────────────────────────
-REP_SMOOTHING  = 15   # smoothing window for hip-crease height signal
-MIN_REP_FRAMES = 15   # min frames between standing peaks (also min segment length)
-# A segment is only counted as a rep if the hip-crease dropped by at least this
-# fraction of frame height from the standing peak. Rejects hip-hinge warmup
-# movements that never approach squat depth.
-MIN_DESCENT_THRESHOLD = 0.10  # 10% of frame height
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -107,23 +98,31 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     print("Pass 1: extracting pose landmarks...")
-    analysis = _analyze(cap, rotation, force_side)
+    analysis = _analyze(cap, rotation, fps, force_side)
     cap.release()
 
     if analysis is None:
         print("ERROR: Could not detect pose or squat bottom. Check camera angle.")
         sys.exit(1)
 
-    frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
+    frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, tibial_ys, valid_frame_indices = analysis
 
     for i, rep in enumerate(reps, 1):
-        print(f"  Rep {i}: {rep['result'].upper():12} (bottom frame {rep['bottom_global']})")
+        t = rep["tempo"]
+        tib = rep["tibial"]
+        print(
+            f"  Rep {i}: {rep['result'].upper():12}"
+            f"  desc={t['descent_s']:.1f}s  asc={t['ascent_s']:.1f}s"
+            f"  hole_v={t['hole_exit_vel']:.3f}  mcv={t['mean_concentric_vel']:.3f}"
+            f"  shin_max={tib['max_angle']:.0f}°"
+            + (f"  [{' '.join(t['flags'])}]" if t["flags"] else "")
+        )
     print("Pass 2: rendering annotated video...")
 
     cap2 = cv2.VideoCapture(str(path))
     cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)  # prevent double-rotate on macOS
     _render(cap2, rotation, fps, frames_data, draw_frames, side, reps,
-            smooth_hip_ys, knee_ys, valid_frame_indices, str(output_path))
+            smooth_hip_ys, knee_ys, tibial_ys, valid_frame_indices, str(output_path))
     cap2.release()
 
     print("\nDone.")
@@ -298,14 +297,15 @@ def _smooth_landmarks_for_drawing(frames_data):
     return draw_frames
 
 
-def _analyze(cap, rotation, force_side=None):
+def _analyze(cap, rotation, fps, force_side=None):
     """
-    Run landmark extraction + per-rep depth judgment.
+    Run landmark extraction + per-rep depth judgment + coaching metrics.
 
     Returns:
         (frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices)
         draw_frames: smoothed copy of frames_data for skeleton/marker rendering only.
-        reps: list of {result, bottom_global, start_global, end_global}
+        reps: list of {result, bottom_global, start_global, end_global,
+                       tempo, tibial, bar_path}
         or None on failure.
     """
     frames_data = _extract_landmarks(cap, rotation)
@@ -324,9 +324,21 @@ def _analyze(cap, rotation, force_side=None):
     hip_key  = f"{side}_hip"
     knee_key = f"{side}_knee"  # used for knee_ys below
 
+    import math as _math
+    heel_key = f"{side}_heel"
+
     valid_frame_indices = [i for i, _ in valid_frames]
-    hip_ys  = [f[hip_key][1]  for _, f in valid_frames]
-    knee_ys = [f[knee_key][1] for _, f in valid_frames]
+    hip_ys   = [f[hip_key][1]  for _, f in valid_frames]
+    knee_ys  = [f[knee_key][1] for _, f in valid_frames]
+    # Tibial angle per valid frame (degrees), for the scrolling graph
+    tibial_ys = []
+    for _, f in valid_frames:
+        heel = f[heel_key]
+        knee = f[knee_key]
+        dx = abs(knee[0] - heel[0])
+        dy = abs(heel[1] - knee[1])
+        tibial_ys.append(_math.degrees(_math.atan2(dx, max(dy, 1e-6))))
+
     smooth_hip_ys = _rolling_average(hip_ys, SMOOTHING_WINDOW)
 
     frame_height = valid_frames[0][1]["height"]
@@ -336,6 +348,8 @@ def _analyze(cap, rotation, force_side=None):
     for start_l, end_l in segments:
         rep = _classify_segment(valid_frames[start_l:end_l], side, frame_height)
         if rep is not None:
+            rep["tempo"]  = compute_tempo(rep, frames_data, side, fps)
+            rep["tibial"] = compute_tibial_angle(rep, frames_data, side)
             reps.append(rep)
 
     if not reps:
@@ -343,13 +357,13 @@ def _analyze(cap, rotation, force_side=None):
 
     draw_frames = _smooth_landmarks_for_drawing(frames_data)
 
-    return frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices
+    return frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, tibial_ys, valid_frame_indices
 
 
 # ── Pass 2: rendering ─────────────────────────────────────────────────────────
 
 def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
-            smooth_hip_ys, knee_ys, valid_frame_indices, output_path):
+            smooth_hip_ys, knee_ys, tibial_ys, valid_frame_indices, output_path):
     """
     Re-read the video frame-by-frame, draw all overlays.
     Writes annotated MP4 if SAVE_VIDEO is True.
@@ -403,9 +417,7 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
 
         # Pass 1: dark backing rects only onto overlay, then one blend.
         overlay = frame.copy()
-        _draw_backgrounds(overlay, frame.shape[1], h,
-                          rep_num, len(reps),
-                          fdata, side)
+        _draw_backgrounds(overlay, w, h, rep_num, len(reps), fdata, side, cur_rep)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
         # Pass 2: all opaque content directly onto the blended frame.
@@ -420,14 +432,16 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
             is_bottom    = frame_idx in bottom_frames
 
             _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth)
-            _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, h)
+            _draw_graph(frame, smooth_hip_ys, knee_ys, tibial_ys, local_idx, h)
             _draw_hud_text(frame, depth_active, near_depth, is_bottom)
+            _draw_metrics_hud(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
-            _draw_rep_counter(frame, rep_num, len(reps), frame.shape[1], h)
+            _draw_rep_counter(frame, rep_num, len(reps), w, h)
         else:
-            _draw_graph(frame, smooth_hip_ys, knee_ys, None, h)
+            _draw_graph(frame, smooth_hip_ys, knee_ys, tibial_ys, None, h)
+            _draw_metrics_hud(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
-            _draw_rep_counter(frame, rep_num, len(reps), frame.shape[1], h)
+            _draw_rep_counter(frame, rep_num, len(reps), w, h)
 
         if SAVE_VIDEO:
             out.write(frame)
@@ -501,6 +515,7 @@ def _draw_skeleton(frame, fdata, side, depth_active, near_depth):
     cv2.circle(frame, hip_crease, 6, marker_color,   1, cv2.LINE_AA)
 
 
+
 def _lights_box_coords(frame_h):
     """Return (box_x0, box_x1, box_y0, box_y1, r, h_pad, gap) for the lights box."""
     PAD_L, PAD_B = 12, 12
@@ -526,7 +541,16 @@ def _rep_counter_coords(frame_w, frame_h, rep_num, total_reps):
     return x, y, tw, th, baseline, label
 
 
-def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, fdata, side):
+def _metrics_hud_coords(frame_w):
+    """Return (x0, y0, w, h) for the metrics HUD panel (top-right)."""
+    MW, MH = 220, 90
+    PAD = 12
+    x0 = frame_w - MW - PAD
+    y0 = PAD
+    return x0, y0, MW, MH
+
+
+def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, fdata, side, cur_rep):
     """
     Paint all semi-transparent dark backing rects onto overlay.
     Called once per frame before the single addWeighted blend.
@@ -558,6 +582,11 @@ def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, fdata, sid
         label = "DEPTH  +" if depth_active else ("BORDERLINE" if near_depth else "NO DEPTH")
         (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
         cv2.rectangle(overlay, (12, 12), (12 + tw + 8, 12 + th + baseline + 8), DARK, -1)
+
+    # Metrics HUD background (top-right) — only when inside a rep
+    if cur_rep is not None:
+        x0, y0, mw, mh = _metrics_hud_coords(frame_w)
+        cv2.rectangle(overlay, (x0, y0), (x0 + mw, y0 + mh), DARK, -1)
 
 
 def _draw_hud_text(frame, depth_active, near_depth, is_bottom):
@@ -603,10 +632,90 @@ def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
 
 
 
-def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_h):
+def _draw_metrics_hud(frame, cur_rep, frame_idx, frame_w):
     """
-    Bottom-left scrolling line chart: hip_y (white) vs knee_y (yellow).
-    Green fill drawn with a single fillPoly call — no per-segment frame copy.
+    Top-right panel: tempo, velocity numbers, tibial angle.
+    Rows: DESC / ASC times, hole-exit vel, mean concentric vel, shin angle.
+    Velocity sparkline drawn below text during ascent phase.
+    Only shown when inside a rep.
+    """
+    if cur_rep is None:
+        return
+
+    x0, y0, mw, mh = _metrics_hud_coords(frame_w)
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    small = 0.45
+    lh    = 16   # line height px
+
+    tempo  = cur_rep.get("tempo", {})
+    tibial = cur_rep.get("tibial", {})
+
+    desc_s  = tempo.get("descent_s")
+    asc_s   = tempo.get("ascent_s")
+    flags   = tempo.get("flags", [])
+    hole_v  = tempo.get("hole_exit_vel")
+    mean_v  = tempo.get("mean_concentric_vel")
+
+    flag_color = YELLOW if flags else WHITE
+
+    # Row 1: phase times
+    desc_str = f"DESC {desc_s:.1f}s" if desc_s is not None else "DESC --"
+    asc_str  = f"ASC  {asc_s:.1f}s"  if asc_s  is not None else "ASC  --"
+    cv2.putText(frame, desc_str, (x0 + 6, y0 + lh),     font, small, flag_color, 1, cv2.LINE_AA)
+    cv2.putText(frame, asc_str,  (x0 + 6, y0 + lh * 2), font, small, flag_color, 1, cv2.LINE_AA)
+
+    # Row 2: flag labels
+    if flags:
+        cv2.putText(frame, " ".join(flags), (x0 + 6, y0 + lh * 3), font, small, YELLOW, 1, cv2.LINE_AA)
+
+    # Row 3: hole-exit velocity (shown once ascent has started)
+    bottom = cur_rep.get("bottom_global", 0)
+    if hole_v is not None and frame_idx >= bottom:
+        cv2.putText(frame, f"HOLE {hole_v:.3f}", (x0 + 6, y0 + lh * 4), font, small, CYAN, 1, cv2.LINE_AA)
+
+    # Row 4: mean concentric velocity (shown once ascent has started)
+    if mean_v is not None and frame_idx >= bottom:
+        cv2.putText(frame, f"MCV  {mean_v:.3f}", (x0 + 6, y0 + lh * 5), font, small, CYAN, 1, cv2.LINE_AA)
+
+    # Row 5: current tibial angle (live, updates every frame)
+    angles    = tibial.get("angles", {})
+    cur_angle = angles.get(frame_idx)
+    if cur_angle is not None:
+        tib_color = YELLOW if cur_angle > TIBIAL_WARN_DEG else WHITE
+        cv2.putText(frame, f"SHIN {cur_angle:.0f}\u00b0", (x0 + 6, y0 + lh * 6), font, small, tib_color, 1, cv2.LINE_AA)
+
+    # ── Velocity sparkline (ascent phase only) ────────────────────────────────
+    velocity = tempo.get("velocity", [])
+    if velocity and frame_idx >= bottom:
+        local_v = frame_idx - bottom
+        v_slice = velocity[:local_v]
+        if len(v_slice) >= 2:
+            SK_W, SK_H = mw - 12, 18
+            sk_x0 = x0 + 6
+            sk_y0 = y0 + mh - SK_H - 4
+
+            v_arr   = [v for v in v_slice if v is not None]
+            v_min   = min(v_arr) if v_arr else 0.0
+            v_max   = max(v_arr) if v_arr else 1.0
+            v_range = max(v_max - v_min, 1e-6)
+
+            def sv_x(i):
+                return sk_x0 + int(i / max(len(v_slice) - 1, 1) * SK_W)
+            def sv_y(v):
+                if v is None:
+                    return sk_y0 + SK_H // 2
+                return sk_y0 + SK_H - int((v - v_min) / v_range * SK_H)
+
+            pts = [(sv_x(i), sv_y(v)) for i, v in enumerate(v_slice)]
+            for j in range(len(pts) - 1):
+                cv2.line(frame, pts[j], pts[j + 1], CYAN, 1, cv2.LINE_AA)
+
+
+def _draw_graph(frame, smooth_hip_ys, knee_ys, tibial_ys, current_local, frame_h):
+    """
+    Bottom-left scrolling line chart: hip_y (white) vs knee_y (yellow dashed)
+    vs tibial angle (cyan). Green fill where depth is active.
+    tibial_ys is parallel to smooth_hip_ys/knee_ys (one entry per valid frame).
     Background rect is handled by _draw_backgrounds before the blend.
     """
     PAD_L, PAD_B = 12, 12
@@ -621,6 +730,7 @@ def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_h):
     start_local = max(0, end_local - GRAPH_FRAMES)
     hip_slice   = smooth_hip_ys[start_local:end_local]
     knee_slice  = knee_ys[start_local:end_local]
+    tib_slice   = tibial_ys[start_local:end_local] if tibial_ys else []
 
     if len(hip_slice) < 2:
         return
@@ -653,6 +763,15 @@ def _draw_graph(frame, smooth_hip_ys, knee_ys, current_local, frame_h):
             cv2.line(frame, knee_pts[i], knee_pts[i + 1], YELLOW, 1, cv2.LINE_AA)
     for i in range(n - 1):
         cv2.line(frame, hip_pts[i], hip_pts[i + 1], WHITE, 1, cv2.LINE_AA)
+
+    # ── Tibial angle overlay (cyan) ───────────────────────────────────────────
+    # tib_slice values are degrees (0–90). Map onto graph Y by scaling to the
+    # same pixel range as hip/knee, treating 0°=y_min and 90°=y_max.
+    if len(tib_slice) >= 2:
+        tib_pts = [(to_gx(i), to_px(y_min + (v / 90.0) * y_range))
+                   for i, v in enumerate(tib_slice)]
+        for i in range(len(tib_pts) - 1):
+            cv2.line(frame, tib_pts[i], tib_pts[i + 1], CYAN, 1, cv2.LINE_AA)
 
     cx = to_gx(n - 1)
     cv2.line(frame, (cx, y0 + 2), (cx, y0 + GH - 2), GREEN, 1, cv2.LINE_AA)
