@@ -38,8 +38,17 @@ GRIND_RATIO      = 1.5   # ascent_time > descent_time * GRIND_RATIO → "GRIND"
 
 # ── Tibial angle ──────────────────────────────────────────────────────────────
 # Shin angle from vertical (degrees).  Measured as atan2(|knee_x - heel_x|, |knee_y - heel_y|).
-TIBIAL_WARN_DEG = 40.0   # above this during descent → forward lean / ankle mobility flag
+# Low-bar squat context: upright shin is expected; >35 deg is notable, >45 deg is problematic.
+TIBIAL_NOTE_DEG = 25.0   # above this → forward knee travel worth watching (low-bar)
+TIBIAL_WARN_DEG = 35.0   # above this → outside low-bar norms, ankle mobility / stance issue
+
+# ── Coaching thresholds (low-bar powerlifting) ────────────────────────────────
+# HOLE/MCV ratio: HOLE velocity as a fraction of MCV.
+# Good hole exit = driving hard from the bottom; low ratio = stalling at the bottom.
+HOLE_MCV_WARN  = 0.60    # HOLE < 60% of MCV → weak hole exit
+HOLE_MCV_NOTE  = 0.80    # HOLE < 80% of MCV → slight hole stall (info only)
+
 
 # ── Velocity ──────────────────────────────────────────────────────────────────
 # Fraction of the ascent used as the "out of hole" window.
-HOLE_EXIT_FRACTION = 0.15   # first 15% of ascent frames
+HOLE_EXIT_FRACTION = 0.25   # first 25% of ascent frames — covers the true out-of-hole drive window

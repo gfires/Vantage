@@ -1,8 +1,8 @@
 # WhiteLights — Project Synopsis
 
-Squat depth analysis tool for powerlifting. Analyzes side-profile video to determine whether a lifter achieves IPF-legal depth (hip crease below top of kneecap), and renders an annotated overlay video with per-rep judgment lights.
+Squat depth analysis tool for powerlifting. Analyzes side-profile video to determine whether a lifter achieves IPF-legal depth (hip crease below top of kneecap), renders an annotated overlay video with per-rep judgment lights and coaching metrics, and outputs a plain-text rep summary table.
 
-Built for the Rice powerlifting team.
+Built for the Rice powerlifting team (low-bar focus).
 
 ---
 
@@ -24,8 +24,9 @@ Built for the Rice powerlifting team.
 ```
 vantage/
 ├── depth_detector.py       # Core detection engine (landmark extraction, depth logic)
-├── visualize.py            # Annotated video renderer + rep segmentation
-├── metrics.py              # Back angle + bar path calculations
+├── visualize.py            # Annotated video renderer + rep segmentation + table output
+├── metrics.py              # Coaching metrics: tempo, tibial angle, depth angle
+├── params.py               # Single source of truth for all tunable constants
 ├── debug_single.py         # CLI debug tool (prints per-frame hip/knee values)
 ├── requirements.txt
 ├── .gitignore              # Excludes tests/raw_videos/, tests/annotated_videos/, models/
@@ -35,7 +36,7 @@ vantage/
 │   └── pose_landmarker_full.task   # Auto-downloaded ~5MB MediaPipe model
 └── tests/
     ├── raw_videos/         # Input iPhone MOV files (gitignored)
-    ├── annotated_videos/   # Output annotated MP4s (gitignored)
+    ├── annotated_videos/   # Output annotated MP4s + rep tables (gitignored)
     ├── labels.json         # Ground truth: 13 pass + 8 fail videos
     └── test_depth.py       # Test harness (80% accuracy gate)
 ```
@@ -46,14 +47,13 @@ vantage/
 
 ### Landmark extraction (`depth_detector.py`)
 
-Extracts 8 joints per frame from MediaPipe's 33-landmark BlazePose model:
+Extracts 7 joints per frame from MediaPipe's 33-landmark BlazePose model (wrist tracking removed as inaccurate):
 
 | Joint | Landmark index |
 |---|---|
 | Hip (L/R) | 23/24 |
 | Knee (L/R) | 25/26 |
 | Shoulder (L/R) | 11/12 |
-| Wrist (L/R) | 15/16 |
 | Heel (L/R) | 29/30 |
 
 Each frame stored as a dict: `{frame_idx, left_hip, right_hip, ..., width, height}`. Hip/knee include visibility score; others are (x, y) only. Frames with no detected pose store `None`.
@@ -78,7 +78,9 @@ Depth is judged on these estimated markers, not the raw joints:
 - Markers never get within `CLOSE_THRESHOLD = 0.02` (2% of frame height) → **FAIL**
 - Within 2% but not crossing → **BORDERLINE**
 
-Checked across the entire video (not just a window around the detected bottom), so the result matches what the overlay shows.
+### Bottom frame detection (`depth_detector.py: _find_bottom_frame`)
+
+Each rep segment starts and ends at a standing position (peak of the height signal). The true bottom is the deepest hip position — `argmax(hip_y)` — within the middle 80% of the segment. The 10% margin at each edge prevents standing-position noise from triggering a false bottom near the start or end of the segment.
 
 ### Rep segmentation (`visualize.py`)
 
@@ -101,19 +103,67 @@ Each valid segment is classified independently using `_classify_segment()`.
 Raw MediaPipe landmarks jitter slightly frame-to-frame even during still positions. To eliminate this visually without affecting classification accuracy, a separate `draw_frames` list is computed during analysis:
 
 - Each joint's x/y is smoothed with a `DRAW_SMOOTHING = 3` frame rolling average
-- `draw_frames` is used exclusively for skeleton and marker rendering
-- `frames_data` (unsmoothed) is used exclusively for depth classification and depth state logic
+- `draw_frames` is used exclusively for skeleton and marker rendering, and for tibial angle computation (so the on-video arc and displayed value are consistent)
+- `frames_data` (unsmoothed) is used for depth classification, depth state logic, and depth angle computation
 
 ### Two-pass rendering
 
-Pass 1 (analysis): open video, extract all landmarks, build `frames_data` and `draw_frames`, segment reps, classify each.
+Pass 1 (analysis): open video, extract all landmarks, build `frames_data` and `draw_frames`, segment reps, classify each, compute all metrics.
 Pass 2 (render): re-open video, iterate frames, draw overlays, write output.
 
 Avoids holding all raw frames in RAM. Trade-off: video is decoded twice.
 
 ### Render loop: single overlay blend
 
-All semi-transparent dark backing rects (graph panel, lights box, rep counter, HUD label) are drawn onto a single `overlay = frame.copy()` per frame, then blended once with `cv2.addWeighted`. All opaque content (skeleton, graph lines, circles, text) is drawn directly onto the post-blend frame. This reduces per-frame `frame.copy()` calls from ~90 to 1.
+All semi-transparent dark backing rects (graph panel, lights box, rep counter, metrics HUD, coaching panel) are drawn onto a single `overlay = frame.copy()` per frame, then blended once with `cv2.addWeighted`. All opaque content (skeleton, graph lines, circles, text) is drawn directly onto the post-blend frame.
+
+---
+
+## Coaching Metrics (`metrics.py`)
+
+Computed per rep after classification. All use raw `frames_data` except tibial angle (uses `draw_frames` for display consistency).
+
+### Tempo (`compute_tempo`)
+
+| Metric | Description |
+|---|---|
+| DESC | Descent duration (rep start → bottom), seconds |
+| ASC | Ascent duration (bottom → rep end), seconds |
+| HOLE | Mean velocity over first 25% of ascent (fh/s) — the out-of-hole drive window |
+| MCV | Mean concentric velocity over full ascent (fh/s) — VBT autoregulation proxy |
+| hole_mcv_ratio | HOLE ÷ MCV — hole-exit quality relative to overall ascent speed |
+
+Velocity units are normalized frame-heights per second (`fh/s`) — dimensionless, relative within a lifter's own data.
+
+**Tempo flags** (appear in coaching panel and warnings table):
+
+| Flag | Condition |
+|---|---|
+| FAST DESC | Descent < 1.5s |
+| SLOW DESC | Descent > 4.0s |
+| GRIND | Ascent > 1.5× descent time |
+| WEAK HOLE | HOLE < 60% of MCV |
+
+### Tibial angle (`compute_tibial_angle`)
+
+Shin angle from vertical: `atan2(|knee_x − heel_x|, |heel_y − knee_y|)` in degrees. 0° = perfectly vertical shin; increases as knee travels forward.
+
+Computed using smoothed `draw_frames` landmarks so the displayed arc on video matches the reported value.
+
+**Thresholds (low-bar calibrated):**
+
+| Range | Flag |
+|---|---|
+| > 35° | KNEE TOO FORWARD |
+| > 25° | WATCH KNEES |
+
+### Depth angle (`compute_depth_angle`)
+
+Angle of the hip-crease → knee-top line against horizontal, at the best sustained depth position.
+
+Scans all frames in the rep for runs of ≥ `MIN_DEPTH_FRAMES` consecutive frames where `hc_y > kt_y`. Returns the most negative angle within any qualifying run (most negative = deepest below parallel). Falls back to best single-frame angle if no qualifying run exists.
+
+Convention: **positive = hip crease below knee top (at depth)**, negative = above parallel.
 
 ---
 
@@ -122,36 +172,75 @@ All semi-transparent dark backing rects (graph panel, lights box, rep counter, H
 | Element | Description |
 |---|---|
 | Skeleton | Gray lines: shoulder→hip, hip→knee, knee→heel. Gray dots at all joints. |
-| Estimated marker line | Colored line between hip-crease and knee-top markers. **Green** = depth active, **Yellow** = borderline, **White** = above parallel. This line (not the skeleton) drives the depth color. |
-| Depth HUD (top-left) | "DEPTH +" / "BORDERLINE" / "NO DEPTH" text label. "BOTTOM" label appears at the detected hole frame. |
+| Estimated marker line | Colored line between hip-crease and knee-top markers. **Green** = depth active, **Yellow** = borderline, **White** = above parallel. |
+| Bottom marker | Magenta ring on hip-crease + "BOTTOM" label at the detected hole frame. |
+| Tibial angle annotation | Purple arc between shin line and vertical reference, with angle label in degrees near the heel. Yellow when > warn threshold. Only shown during active reps. |
 | Graph HUD (bottom-left) | 300×100px scrolling chart of smoothed hip_y (white) vs knee_y (yellow dashed) over last 90 frames. Green fill where depth is active. |
-| Lights box (right of graph) | Always-visible dark box. Three large circles appear after the bottom and past 75% of rep duration — **white** = pass, **red** = fail, **yellow** = borderline. |
-| Rep counter (bottom-right) | "REP N/M" displayed independently of the lights box. |
+| Lights box (right of graph) | Three large circles after 75% of rep duration — **white** = pass, **red** = fail, **yellow** = borderline. |
+| Rep counter (bottom-right) | "REP N/M". |
+| Metrics HUD (top-right) | Live phase label (DESCENT / HOLE / ASCENT), DESC/ASC times, HOLE and MCV velocities (fh/s). Shown during active reps only. |
+| Coaching panel (below metrics HUD) | Coaching flags: FAST DESC, SLOW DESC, GRIND, WEAK HOLE, KNEE TOO FORWARD, WATCH KNEES. Shown after the bottom frame. |
 
-### Output toggles (top of visualize.py)
+### Output toggles (top of `visualize.py`)
 
 ```python
 SAVE_VIDEO = True    # write annotated MP4 to tests/annotated_videos/, auto-open after
 SHOW_LIVE  = True    # display in cv2.imshow() window while rendering
 ```
 
-### Tuning constants (top of visualize.py)
+---
+
+## Rep Summary Table
+
+In addition to the annotated video, a plain-text table is written to `tests/annotated_videos/<stem>_table.txt` and printed to the terminal.
+
+Columns: one per rep. Rows:
+
+| Row | Content |
+|---|---|
+| Result | PASS / FAIL / BORDERLINE |
+| Hole time | Duration of first 25% of ascent (seconds) |
+| Ascent time | Full concentric phase (seconds) |
+| Depth angle | Hip-crease→knee-top angle vs horizontal at best sustained depth (degrees) |
+| Max shin | Peak tibial angle during the rep (degrees) |
+| Warnings | All coaching flags for the rep |
+
+---
+
+## All Tunable Constants (`params.py`)
 
 ```python
+# Anatomical markers
 KNEE_TOP_OVERSHOOT    = 0.18   # how far past knee joint the knee-top marker sits
 HIP_CREASE_FRAC       = 0.88   # how far down shoulder→hip the crease marker sits
-DRAW_SMOOTHING        = 3      # rolling average window for skeleton drawing coords (display only)
-REP_SMOOTHING         = 15     # hip-crease height signal smoothing window for rep boundaries
-MIN_REP_FRAMES        = 15     # min frames between standing peaks / min segment length
-MIN_DESCENT_THRESHOLD = 0.10   # min drop from standing peak to valley to count as a rep
-```
 
-Detection constants live in `depth_detector.py`:
-```python
-MIN_DEPTH_FRAMES  = 3     # consecutive depth frames required for pass
-CLOSE_THRESHOLD   = 0.02  # within 2% of frame height = borderline
-SMOOTHING_WINDOW  = 5     # hip Y rolling average for bottom detection
-VISIBILITY_THRESHOLD = 0.7
+# Depth detection
+MIN_DEPTH_FRAMES      = 3      # consecutive depth frames required for PASS
+CLOSE_THRESHOLD       = 0.02   # within 2% of frame height = BORDERLINE
+SMOOTHING_WINDOW      = 5      # hip Y rolling average for bottom detection
+VISIBILITY_THRESHOLD  = 0.7    # min landmark visibility to use a side
+
+# Rep segmentation
+REP_SMOOTHING         = 15     # hip-crease height signal smoothing for rep boundaries
+MIN_REP_FRAMES        = 15     # min frames between standing peaks / min segment length
+MIN_DESCENT_THRESHOLD = 0.10   # min hip drop fraction to count as a rep
+
+# Drawing
+DRAW_SMOOTHING        = 3      # rolling average for skeleton/marker rendering (display only)
+
+# Tempo thresholds
+DESCENT_FAST_S        = 1.5
+DESCENT_SLOW_S        = 4.0
+GRIND_RATIO           = 1.5    # ascent > descent × this → GRIND
+
+# Tibial angle (low-bar calibrated)
+TIBIAL_NOTE_DEG       = 25.0   # WATCH KNEES
+TIBIAL_WARN_DEG       = 35.0   # KNEE TOO FORWARD
+
+# Velocity
+HOLE_EXIT_FRACTION    = 0.25   # first 25% of ascent = hole-exit window
+HOLE_MCV_WARN         = 0.60   # HOLE < 60% of MCV → WEAK HOLE
+HOLE_MCV_NOTE         = 0.80   # informational threshold
 ```
 
 ---
@@ -190,7 +279,9 @@ python3.12 debug_single.py tests/raw_videos/valid_1.MOV
 python3.12 tests/test_depth.py
 ```
 
-Output always goes to `tests/annotated_videos/<stem>_annotated.mp4`.
+Outputs go to `tests/annotated_videos/`:
+- `<stem>_annotated.mp4` — annotated video
+- `<stem>_table.txt` — rep summary table
 
 ---
 
@@ -199,4 +290,4 @@ Output always goes to `tests/annotated_videos/<stem>_annotated.mp4`.
 - `app.py` — Streamlit UI (upload → analyze → display results)
 - Claude AI coaching breakdown (Anthropic SDK is in requirements, not wired)
 - Multi-rep support in `depth_detector.py`'s `analyze_video()` — it's still single-rep; multi-rep logic lives only in `visualize.py`
-- GPU inference — MediaPipe BlazePose supports CoreML/GPU delegates; would reduce extraction from ~21.8ms to ~2–5ms/frame, ~2× overall pipeline speedup
+- GPU inference — MediaPipe BlazePose supports CoreML/GPU delegates; would reduce extraction from ~21.8ms to ~2–5ms/frame

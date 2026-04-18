@@ -41,9 +41,12 @@ from params import (
     MIN_REP_FRAMES,
     MIN_DESCENT_THRESHOLD,
     DRAW_SMOOTHING,
+    TIBIAL_NOTE_DEG,
     TIBIAL_WARN_DEG,
+    HOLE_MCV_NOTE,
+    HOLE_EXIT_FRACTION,
 )
-from metrics import compute_tempo, compute_tibial_angle
+from metrics import compute_tempo, compute_tibial_angle, compute_depth_angle
 
 # ── Colors (BGR) ──────────────────────────────────────────────────────────────
 WHITE   = (255, 255, 255)
@@ -63,6 +66,96 @@ PURPLE = (210, 0, 220)    # BGR magenta-pink — tibial angle annotation
 SAVE_VIDEO  = True   # write annotated MP4 alongside input, then auto-open it
 SHOW_LIVE   = True   # display frames in a cv2 window as they are rendered
 
+
+
+# ── Rep table ─────────────────────────────────────────────────────────────────
+
+def _rep_warnings(rep: dict) -> str:
+    """Collect all warnings for a rep: tempo flags + tibial threshold breaches."""
+    warns = list(rep["tempo"].get("flags", []))
+    max_tib = rep["tibial"].get("max_angle")
+    if max_tib is not None:
+        if max_tib > TIBIAL_WARN_DEG:
+            warns.append("KNEE TOO FORWARD")
+        elif max_tib > TIBIAL_NOTE_DEG:
+            warns.append("WATCH KNEES")
+    return ", ".join(warns) or "--"
+
+
+def _output_rep_table(reps: list, output_path: str) -> None:
+    """
+    Write a plain-text rep summary table to output_path.
+
+    Columns: one per rep.
+    Rows:
+      Result        — PASS / FAIL / BORDERLINE
+      Hole time     — first 25% of ascent, in seconds
+      Ascent time   — full concentric phase, in seconds
+      Depth angle   — hip-crease→knee-top angle vs horizontal at bottom (deg)
+                      negative = below parallel, positive = above
+      Max shin      — peak tibial angle during the rep (deg)
+      Warnings      — coaching flags
+    """
+    n = len(reps)
+    if n == 0:
+        return
+
+    # ── Build cell data ───────────────────────────────────────────────────────
+    def _hole_s(rep):
+        t = rep.get("tempo", {})
+        bottom = rep["bottom_global"]
+        end    = rep["end_global"]
+        asc_total = max(end - bottom, 1)
+        hole_frames = max(1, int(asc_total * HOLE_EXIT_FRACTION))
+        fps_approx = asc_total / max(t.get("ascent_s", 1) or 1, 1e-6)
+        hole_s = hole_frames / fps_approx
+        return f"{hole_s:.2f}s"
+
+    rows = {
+        "Result":      [rep["result"].upper()                                         for rep in reps],
+        "Hole time":   [_hole_s(rep)                                                  for rep in reps],
+        "Ascent time": [f"{rep['tempo'].get('ascent_s', 0):.2f}s"                    for rep in reps],
+        "Depth angle": [
+            (f"{rep['depth_angle']:+.1f}deg" if rep.get("depth_angle") is not None else "--")
+            for rep in reps
+        ],
+        "Max shin":    [
+            (f"{rep['tibial']['max_angle']:.0f}deg" if rep["tibial"].get("max_angle") is not None else "--")
+            for rep in reps
+        ],
+        "Warnings":    [
+            _rep_warnings(rep) for rep in reps
+        ],
+    }
+
+    # ── Column widths ─────────────────────────────────────────────────────────
+    rep_headers = [f"Rep {i}" for i in range(1, n + 1)]
+    label_w = max(len(k) for k in rows)
+    col_ws   = [
+        max(len(rep_headers[i]), *(len(rows[k][i]) for k in rows))
+        for i in range(n)
+    ]
+
+    def _row(label, cells):
+        return f"  {label:<{label_w}}  " + "  ".join(
+            f"{c:^{col_ws[i]}}" for i, c in enumerate(cells)
+        )
+
+    sep = "  " + "-" * label_w + "  " + "  ".join("-" * w for w in col_ws)
+
+    lines = []
+    lines.append("  " + " " * label_w + "  " + "  ".join(
+        f"{h:^{col_ws[i]}}" for i, h in enumerate(rep_headers)
+    ))
+    lines.append(sep)
+    for label, cells in rows.items():
+        lines.append(_row(label, cells))
+    lines.append("")
+
+    text = "\n".join(lines)
+    print("\n" + text)
+    with open(output_path, "w") as f:
+        f.write(text + "\n")
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -113,11 +206,16 @@ def main():
         tib = rep["tibial"]
         print(
             f"  Rep {i}: {rep['result'].upper():12}"
+            f"  start={rep['start_global']}  bottom={rep['bottom_global']}  end={rep['end_global']}"
             f"  desc={t['descent_s']:.1f}s  asc={t['ascent_s']:.1f}s"
             f"  hole_v={t['hole_exit_vel']:.3f}  mcv={t['mean_concentric_vel']:.3f}"
-            f"  shin_max={tib['max_angle']:.0f}°"
+            f"  shin_max={tib['max_angle']:.0f}"
             + (f"  [{' '.join(t['flags'])}]" if t["flags"] else "")
         )
+    table_path = annotated_dir / (path.stem + "_table.txt")
+    _output_rep_table(reps, str(table_path))
+    print(f"  Table:  {table_path}")
+
     print("Pass 2: rendering annotated video...")
 
     cap2 = cv2.VideoCapture(str(path))
@@ -347,7 +445,8 @@ def _analyze(cap, rotation, fps, force_side=None):
     # and angle value are derived from the same 3-frame averaged coordinates.
     draw_frames = _smooth_landmarks_for_drawing(frames_data)
     for rep in reps:
-        rep["tibial"] = compute_tibial_angle(rep, draw_frames, side)
+        rep["tibial"]      = compute_tibial_angle(rep, draw_frames, side)
+        rep["depth_angle"] = compute_depth_angle(rep, draw_frames, side)
 
     return frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices
 
@@ -419,15 +518,18 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
             (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
             depth_active = hc_y > kt_y
             near_depth   = abs(hc_y - kt_y) < (frame_h * CLOSE_THRESHOLD)
-            tib_angle = cur_rep["tibial"]["angles"].get(frame_idx) if cur_rep else None
-            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle)
+            tib_angle  = cur_rep["tibial"]["angles"].get(frame_idx) if cur_rep else None
+            is_bottom  = cur_rep is not None and frame_idx == cur_rep["bottom_global"]
+            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle, is_bottom)
             _draw_graph(frame, smooth_hip_ys, knee_ys, local_idx, h)
             _draw_metrics_hud(frame, cur_rep, frame_idx, w)
+            _draw_coaching_panel(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
             _draw_rep_counter(frame, rep_num, len(reps), w, h)
         else:
             _draw_graph(frame, smooth_hip_ys, knee_ys, None, h)
             _draw_metrics_hud(frame, cur_rep, frame_idx, w)
+            _draw_coaching_panel(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
             _draw_rep_counter(frame, rep_num, len(reps), w, h)
 
@@ -458,7 +560,7 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
 
 # ── Drawing helpers ───────────────────────────────────────────────────────────
 
-def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None):
+def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None, is_bottom=False):
     """Draw joint connections and circles for the selected side."""
     hip      = _pt(fdata[f"{side}_hip"])
     knee     = _pt(fdata[f"{side}_knee"])
@@ -500,6 +602,12 @@ def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=No
     cv2.circle(frame, knee_top,   6, marker_color,   1, cv2.LINE_AA)
     cv2.circle(frame, hip_crease, 6, MARKER_DOT,    -1, cv2.LINE_AA)
     cv2.circle(frame, hip_crease, 6, marker_color,   1, cv2.LINE_AA)
+
+    # ── Bottom frame marker ───────────────────────────────────────────────────
+    if is_bottom:
+        cv2.circle(frame, hip_crease, 14, MAGENTA, 2, cv2.LINE_AA)
+        cv2.putText(frame, "BOTTOM", (hip_crease[0] + 16, hip_crease[1] + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, MAGENTA, 1, cv2.LINE_AA)
 
     # ── Tibial angle annotation (active reps only) ────────────────────────────
     if tibial_angle is not None:
@@ -575,12 +683,21 @@ def _rep_counter_coords(frame_w, frame_h, rep_num, total_reps):
 
 
 def _metrics_hud_coords(frame_w):
-    """Return (x0, y0, w, h) for the metrics HUD panel (top-right)."""
-    MW, MH = 220, 90
+    """Return (x0, y0, w, h) for the metrics HUD panel (top-right).
+    Rows: DESC, ASC, HOLE, MCV, STICK = 5 rows × 16px + 8px padding = 88px."""
+    MW, MH = 240, 96
     PAD = 12
     x0 = frame_w - MW - PAD
     y0 = PAD
     return x0, y0, MW, MH
+
+
+def _coaching_panel_coords(frame_w):
+    """Return (x0, y0, w, h) for the coaching insight panel directly below the metrics HUD."""
+    x0, y0, mw, mh = _metrics_hud_coords(frame_w)
+    GAP = 4
+    CW, CH = mw, 72   # up to 4 coaching rows × 16px + 8px padding
+    return x0, y0 + mh + GAP, CW, CH
 
 
 def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, cur_rep):
@@ -605,10 +722,12 @@ def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, cur_rep):
         x, y, tw, th, baseline, _ = _rep_counter_coords(frame_w, frame_h, rep_num, total_reps)
         cv2.rectangle(overlay, (x - 6, y - th - 6), (x + tw + 6, y + baseline + 6), DARK, -1)
 
-    # Metrics HUD background (top-right) — only when inside a rep
+    # Metrics HUD + coaching panel backgrounds (top-right) — only when inside a rep
     if cur_rep is not None:
         x0, y0, mw, mh = _metrics_hud_coords(frame_w)
         cv2.rectangle(overlay, (x0, y0), (x0 + mw, y0 + mh), DARK, -1)
+        cx0, cy0, cw, ch = _coaching_panel_coords(frame_w)
+        cv2.rectangle(overlay, (cx0, cy0), (cx0 + cw, cy0 + ch), DARK, -1)
 
 
 
@@ -646,9 +765,8 @@ def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
 
 def _draw_metrics_hud(frame, cur_rep, frame_idx, frame_w):
     """
-    Top-right panel: tempo, velocity numbers, tibial angle.
-    Rows: DESC / ASC times, hole-exit vel, mean concentric vel, shin angle.
-    Velocity sparkline drawn below text during ascent phase.
+    Top-right panel: raw tempo and velocity numbers.
+    Rows: DESC, ASC, HOLE, MCV, STICK.
     Only shown when inside a rep.
     """
     if cur_rep is None:
@@ -657,36 +775,89 @@ def _draw_metrics_hud(frame, cur_rep, frame_idx, frame_w):
     x0, y0, _, _ = _metrics_hud_coords(frame_w)
     font  = cv2.FONT_HERSHEY_SIMPLEX
     small = 0.45
-    lh    = 16   # line height px
+    lh    = 16
 
     tempo  = cur_rep.get("tempo", {})
+    desc_s = tempo.get("descent_s")
+    asc_s  = tempo.get("ascent_s")
+    hole_v = tempo.get("hole_exit_vel")
+    mean_v = tempo.get("mean_concentric_vel")
 
-    desc_s  = tempo.get("descent_s")
-    asc_s   = tempo.get("ascent_s")
-    flags   = tempo.get("flags", [])
-    hole_v  = tempo.get("hole_exit_vel")
-    mean_v  = tempo.get("mean_concentric_vel")
+    bottom    = cur_rep.get("bottom_global", 0)
+    end       = cur_rep.get("end_global", bottom)
+    asc_total = max(end - bottom, 1)
+    hole_end  = bottom + max(1, int(asc_total * HOLE_EXIT_FRACTION))
 
-    flag_color = YELLOW if flags else WHITE
+    in_descent = frame_idx < bottom
+    in_hole    = bottom <= frame_idx < hole_end
 
-    # Row 1: phase times
+    # Stage label: live indicator of which phase we're in
+    if in_descent:
+        stage_label, stage_color = "[ DESCENT ]", WHITE
+    elif in_hole:
+        stage_label, stage_color = "[ HOLE    ]", CYAN
+    else:
+        stage_label, stage_color = "[ ASCENT  ]", GREEN
+    cv2.putText(frame, stage_label, (x0 + 6, y0 + lh), font, small, stage_color, 1, cv2.LINE_AA)
+
+    # DESC / ASC times — always available
     desc_str = f"DESC {desc_s:.1f}s" if desc_s is not None else "DESC --"
     asc_str  = f"ASC  {asc_s:.1f}s"  if asc_s  is not None else "ASC  --"
-    cv2.putText(frame, desc_str, (x0 + 6, y0 + lh),     font, small, flag_color, 1, cv2.LINE_AA)
-    cv2.putText(frame, asc_str,  (x0 + 6, y0 + lh * 2), font, small, flag_color, 1, cv2.LINE_AA)
+    cv2.putText(frame, desc_str, (x0 + 6, y0 + lh * 2), font, small, WHITE, 1, cv2.LINE_AA)
+    cv2.putText(frame, asc_str,  (x0 + 6, y0 + lh * 3), font, small, WHITE, 1, cv2.LINE_AA)
 
-    # Row 2: flag labels
-    if flags:
-        cv2.putText(frame, " ".join(flags), (x0 + 6, y0 + lh * 3), font, small, YELLOW, 1, cv2.LINE_AA)
+    # HOLE / MCV — shown once past the bottom
+    if not in_descent:
+        if hole_v is not None:
+            cv2.putText(frame, f"HOLE  {hole_v:.3f} fh/s", (x0 + 6, y0 + lh * 4), font, small, CYAN, 1, cv2.LINE_AA)
+        if mean_v is not None:
+            cv2.putText(frame, f"MCV   {mean_v:.3f} fh/s", (x0 + 6, y0 + lh * 5), font, small, CYAN, 1, cv2.LINE_AA)
 
-    # Row 3: hole-exit velocity (shown once ascent has started)
+
+def _draw_coaching_panel(frame, cur_rep, frame_idx, frame_w):
+    """
+    Coaching insight panel directly below the metrics HUD.
+    Shows tempo flags (FAST DESC, SLOW DESC, GRIND) and velocity-derived
+    coaching cues (WEAK HOLE, EARLY STICK, LATE STICK, tibial warning).
+    Only shown when inside a rep and past the bottom.
+    """
+    if cur_rep is None:
+        return
+
     bottom = cur_rep.get("bottom_global", 0)
-    if hole_v is not None and frame_idx >= bottom:
-        cv2.putText(frame, f"HOLE {hole_v:.3f} fh/s", (x0 + 6, y0 + lh * 4), font, small, CYAN, 1, cv2.LINE_AA)
+    if frame_idx < bottom:
+        return
 
-    # Row 4: mean concentric velocity (shown once ascent has started)
-    if mean_v is not None and frame_idx >= bottom:
-        cv2.putText(frame, f"MCV  {mean_v:.3f} fh/s", (x0 + 6, y0 + lh * 5), font, small, CYAN, 1, cv2.LINE_AA)
+    tempo  = cur_rep.get("tempo", {})
+    tibial = cur_rep.get("tibial", {})
+    flags  = tempo.get("flags", [])
+    max_tib = tibial.get("max_angle")
+
+    # Build coaching rows: (text, color)
+    rows = []
+    for f in flags:
+        rows.append((f, YELLOW))
+
+    if max_tib is not None:
+        if max_tib > TIBIAL_WARN_DEG:
+            rows.append(("KNEE TOO FORWARD", YELLOW))
+        elif max_tib > TIBIAL_NOTE_DEG:
+            rows.append(("WATCH KNEES", WHITE))
+
+    hole_mcv = tempo.get("hole_mcv_ratio")
+    if hole_mcv is not None and hole_mcv < HOLE_MCV_NOTE:
+        pct = int(hole_mcv * 100)
+        rows.append((f"HOLE {pct}% of MCV", WHITE))
+
+    if not rows:
+        return
+
+    x0, y0, _, _ = _coaching_panel_coords(frame_w)
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    small = 0.45
+    lh    = 16
+    for i, (text, color) in enumerate(rows):
+        cv2.putText(frame, text, (x0 + 6, y0 + lh * (i + 1)), font, small, color, 1, cv2.LINE_AA)
 
 
 

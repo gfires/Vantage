@@ -10,12 +10,14 @@ import math
 import numpy as np
 
 from params import (
+    KNEE_TOP_OVERSHOOT,
     HIP_CREASE_FRAC,
     DESCENT_FAST_S,
     DESCENT_SLOW_S,
     GRIND_RATIO,
     HOLE_EXIT_FRACTION,
     TIBIAL_WARN_DEG,
+    HOLE_MCV_WARN,
 )
 
 
@@ -87,11 +89,9 @@ def compute_tempo(rep: dict, frames_data: list, side: str, fps: float) -> dict:
     hole_exit_vals = [v for v in velocity[:hole_exit_n] if not math.isnan(v)]
     hole_exit_vel = round(float(np.mean(hole_exit_vals)), 4) if hole_exit_vals else None
 
-    # Sticking point: argmin velocity in the first third of the ascent
-    third = max(1, len(velocity) // 3)
-    sticking_pct = int(np.nanargmin(velocity[:third]) / max(len(velocity), 1) * 100) if valid_v else None
-
+    # ── Coaching flags ────────────────────────────────────────────────────────
     flags = []
+
     if descent_s < DESCENT_FAST_S:
         flags.append("FAST DESC")
     elif descent_s > DESCENT_SLOW_S:
@@ -99,13 +99,20 @@ def compute_tempo(rep: dict, frames_data: list, side: str, fps: float) -> dict:
     if ascent_s > descent_s * GRIND_RATIO:
         flags.append("GRIND")
 
+    # Hole-exit quality: HOLE as fraction of MCV
+    hole_mcv_ratio = None
+    if hole_exit_vel is not None and mean_concentric_vel and mean_concentric_vel > 1e-6:
+        hole_mcv_ratio = round(hole_exit_vel / mean_concentric_vel, 3)
+        if hole_mcv_ratio < HOLE_MCV_WARN:
+            flags.append("WEAK HOLE")
+
     return {
-        "descent_s":          round(descent_s, 2),
-        "ascent_s":           round(ascent_s, 2),
-        "velocity":           [round(v, 4) if not math.isnan(v) else None for v in velocity],
-        "mean_concentric_vel": mean_concentric_vel,   # normalised frame-heights/s
-        "hole_exit_vel":       hole_exit_vel,          # mean vel over first ~15% of ascent
-        "sticking_pct":        sticking_pct,
+        "descent_s":           round(descent_s, 2),
+        "ascent_s":            round(ascent_s, 2),
+        "velocity":            [round(v, 4) if not math.isnan(v) else None for v in velocity],
+        "mean_concentric_vel": mean_concentric_vel,
+        "hole_exit_vel":       hole_exit_vel,
+        "hole_mcv_ratio":      hole_mcv_ratio,
         "flags":               flags,
     }
 
@@ -149,6 +156,80 @@ def compute_tibial_angle(rep: dict, frames_data: list, side: str) -> dict:
         "max_frame": max_frame,
         "flagged":   max_angle > TIBIAL_WARN_DEG,
     }
+
+
+def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None:
+    """
+    Compute the best depth angle sustained for >= MIN_DEPTH_FRAMES consecutive frames.
+
+    Scans all frames in the rep, finds runs where hip crease is below knee top
+    (hc_y > kt_y in screen coords) for at least MIN_DEPTH_FRAMES consecutive frames,
+    and returns the most negative angle within that qualifying window.
+
+    Convention:
+      0 deg   = hip crease level with knee top (parallel)
+      negative = hip crease below knee top (depth achieved)
+      positive = hip crease above knee top (not at depth)
+
+    Falls back to the single best angle across the rep if no qualifying run exists.
+    Returns None if no valid frames.
+    """
+    from params import MIN_DEPTH_FRAMES as _MDF
+
+    start = rep["start_global"]
+    end   = rep["end_global"]
+
+    def _angle_for_frame(f):
+        heel     = f[f"{side}_heel"]
+        knee     = f[f"{side}_knee"]
+        shoulder = f[f"{side}_shoulder"]
+        hip      = f[f"{side}_hip"]
+        kt_y = heel[1] + (knee[1] - heel[1]) * (1.0 + KNEE_TOP_OVERSHOOT)
+        kt_x = heel[0] + (knee[0] - heel[0]) * (1.0 + KNEE_TOP_OVERSHOOT)
+        hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+        hc_x = shoulder[0] + (hip[0] - shoulder[0]) * HIP_CREASE_FRAC
+        # Angle of the hc→kt line against horizontal.
+        # Use the full 2D distance as denominator so dx≈0 never blows up.
+        # Sign: positive = hc below kt (depth achieved), negative = above.
+        dx = kt_x - hc_x
+        dy = kt_y - hc_y   # positive when kt is lower than hc (not at depth)
+        dist = math.hypot(dx, dy)
+        # Signed angle from horizontal: negative means hc is above kt (depth),
+        # but we want positive = depth, so flip: use hc_y - kt_y as the rise.
+        rise = hc_y - kt_y   # positive in screen coords = hc lower = depth achieved
+        angle = math.degrees(math.asin(max(-1.0, min(1.0, rise / dist)))) if dist > 1e-6 else 0.0
+        return angle, (hc_y > kt_y)
+
+    frame_angles = []   # list of (frame_idx, angle, at_depth)
+    for i in range(start, end + 1):
+        f = frames_data[i] if i < len(frames_data) else None
+        if f is None:
+            continue
+        angle, at_depth = _angle_for_frame(f)
+        frame_angles.append((i, angle, at_depth))
+
+    if not frame_angles:
+        return None
+
+    # Find best angle within any run of >= MIN_DEPTH_FRAMES consecutive at-depth frames
+    best_in_run = None
+    run_len = 0
+    run_best = None
+    for _, angle, at_depth in frame_angles:
+        if at_depth:
+            run_len += 1
+            run_best = angle if run_best is None else min(run_best, angle)
+            if run_len >= _MDF:
+                best_in_run = run_best if best_in_run is None else min(best_in_run, run_best)
+        else:
+            run_len = 0
+            run_best = None
+
+    if best_in_run is not None:
+        return round(best_in_run, 1)
+
+    # Fallback: best single-frame angle across the whole rep
+    return round(min(a for _, a, _ in frame_angles), 1)
 
 
 def compute_back_angle(frames_data: list, side: str) -> dict:

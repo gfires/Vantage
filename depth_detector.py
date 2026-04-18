@@ -248,22 +248,24 @@ def _rolling_average(values: list, window: int) -> list:
 
 def _find_bottom_frame(smooth_hip_ys: list) -> int | None:
     """
-    Find the squat bottom as the frame where hip stops descending.
-    Primary: zero-crossing of smoothed vertical velocity (positive → non-positive).
-    Fallback: frame with maximum hip y-value (lowest position).
+    Find the squat bottom as the deepest hip position within the rep.
+
+    Each segment starts and ends at a standing position (peak of the height
+    signal), so the true bottom is simply the global maximum of hip Y
+    (lowest physical position) within the segment.  We constrain the search
+    to the middle 80% of the segment to avoid standing-position noise at
+    the edges triggering a false bottom near the start or end.
     """
-    if len(smooth_hip_ys) < 3:
+    n = len(smooth_hip_ys)
+    if n < 3:
         return None
 
-    velocities = [smooth_hip_ys[i + 1] - smooth_hip_ys[i] for i in range(len(smooth_hip_ys) - 1)]
+    margin = max(1, int(n * 0.10))
+    search = smooth_hip_ys[margin: n - margin]
+    if not search:
+        return int(np.argmax(smooth_hip_ys))
 
-    # Find the first frame where downward velocity reverses
-    for i in range(len(velocities) - 1):
-        if velocities[i] > 0 and velocities[i + 1] <= 0:
-            return i + 1
-
-    # Fallback: deepest position
-    return int(np.argmax(smooth_hip_ys))
+    return margin + int(np.argmax(search))
 
 
 def _max_consecutive_true(flags: list) -> int:
