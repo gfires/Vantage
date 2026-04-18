@@ -76,9 +76,9 @@ def _rep_warnings(rep: dict) -> str:
     max_tib = rep["tibial"].get("max_angle")
     if max_tib is not None:
         if max_tib > TIBIAL_WARN_DEG:
-            warns.append("KNEE TOO FORWARD")
+            warns.append("KNEES TOO FORWARD")
         elif max_tib > TIBIAL_NOTE_DEG:
-            warns.append("WATCH KNEES")
+            warns.append("KNEES SLIGHTLY FORWARD")
     return ", ".join(warns) or "--"
 
 
@@ -89,6 +89,7 @@ def _output_rep_table(reps: list, output_path: str) -> None:
     Columns: one per rep.
     Rows:
       Result        — PASS / FAIL / BORDERLINE
+      Descent time  — full eccentric phase, in seconds
       Hole time     — first 25% of ascent, in seconds
       Ascent time   — full concentric phase, in seconds
       Depth angle   — hip-crease→knee-top angle vs horizontal at bottom (deg)
@@ -112,9 +113,10 @@ def _output_rep_table(reps: list, output_path: str) -> None:
         return f"{hole_s:.2f}s"
 
     rows = {
-        "Result":      [rep["result"].upper()                                         for rep in reps],
-        "Hole time":   [_hole_s(rep)                                                  for rep in reps],
-        "Ascent time": [f"{rep['tempo'].get('ascent_s', 0):.2f}s"                    for rep in reps],
+        "Result":       [rep["result"].upper()                                         for rep in reps],
+        "Descent time": [f"{rep['tempo'].get('descent_s', 0):.2f}s"                   for rep in reps],
+        "Hole time":    [_hole_s(rep)                                                  for rep in reps],
+        "Ascent time":  [f"{rep['tempo'].get('ascent_s', 0):.2f}s"                    for rep in reps],
         "Depth angle": [
             (f"{rep['depth_angle']:+.1f}deg" if rep.get("depth_angle") is not None else "--")
             for rep in reps
@@ -386,6 +388,11 @@ def _smooth_landmarks_for_drawing(frames_data):
         df = dict(f)  # shallow copy — width/height/frame_idx unchanged
         for j in joints_xy:
             sx, sy = coords[j][0][i], coords[j][1][i]
+            # Fall back to original if smoothing propagated NaN from a nearby None frame
+            if sx != sx:  # NaN check
+                sx = f[j][0]
+            if sy != sy:
+                sy = f[j][1]
             if j in joints_vis:
                 df[j] = (sx, sy, f[j][2])   # preserve visibility
             else:

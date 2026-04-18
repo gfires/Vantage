@@ -164,12 +164,12 @@ def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None
 
     Scans all frames in the rep, finds runs where hip crease is below knee top
     (hc_y > kt_y in screen coords) for at least MIN_DEPTH_FRAMES consecutive frames,
-    and returns the most negative angle within that qualifying window.
+    and returns the most positive (deepest) angle within that qualifying window.
 
     Convention:
-      0 deg   = hip crease level with knee top (parallel)
-      negative = hip crease below knee top (depth achieved)
-      positive = hip crease above knee top (not at depth)
+      0 deg    = hip crease level with knee top (parallel)
+      positive = hip crease below knee top (depth achieved)
+      negative = hip crease above knee top (not at depth)
 
     Falls back to the single best angle across the rep if no qualifying run exists.
     Returns None if no valid frames.
@@ -218,9 +218,9 @@ def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None
     for _, angle, at_depth in frame_angles:
         if at_depth:
             run_len += 1
-            run_best = angle if run_best is None else min(run_best, angle)
+            run_best = angle if run_best is None else max(run_best, angle)
             if run_len >= _MDF:
-                best_in_run = run_best if best_in_run is None else min(best_in_run, run_best)
+                best_in_run = run_best if best_in_run is None else max(best_in_run, run_best)
         else:
             run_len = 0
             run_best = None
@@ -229,7 +229,7 @@ def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None
         return round(best_in_run, 1)
 
     # Fallback: best single-frame angle across the whole rep
-    return round(min(a for _, a, _ in frame_angles), 1)
+    return round(max(a for _, a, _ in frame_angles), 1)
 
 
 def compute_back_angle(frames_data: list, side: str) -> dict:

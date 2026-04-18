@@ -13,7 +13,7 @@ KNEE_TOP_OVERSHOOT = 0.18
 
 # Hip-crease marker: this fraction of the way along the shoulder→hip vector.
 # 0.88 = 88% down from shoulder (≈ 12% above the hip joint center).
-HIP_CREASE_FRAC = 0.88
+HIP_CREASE_FRAC = 0.80
 
 # ── Depth detection ───────────────────────────────────────────────────────────
 VISIBILITY_THRESHOLD = 0.7   # min landmark visibility to use a side
