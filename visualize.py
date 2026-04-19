@@ -480,7 +480,7 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
 
     out = None
     if SAVE_VIDEO:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"avc1")
         out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
 
     delay_ms = max(1, int(1000 / fps))  # for SHOW_LIVE playback pacing
