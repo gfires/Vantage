@@ -69,13 +69,15 @@
     font-size: 0.75rem;
     color: #4b5563;
   }
-  .file-chosen {
-    margin-top: 1rem;
-    font-size: 0.8rem;
-    color: #6b7280;
-    text-align: center;
-    min-height: 1.2em;
+  .file-chosen { display: none; }
+
+  .drop-zone.has-file {
+    border-color: #2563eb;
+    background: #16182a;
   }
+  .drop-zone.has-file .drop-icon { opacity: 1; }
+  .drop-zone.has-file .drop-label { color: #f0f0f5; }
+  .drop-zone.has-file .drop-hint { color: #2563eb; }
   .btn {
     display: block;
     width: 100%;
@@ -126,16 +128,16 @@
   /* ── Results layout ── */
   .results {
     display: none;
-    max-width: 860px;
+    max-width: 1400px;
     margin: 0 auto;
-    padding: 0 1.5rem 3rem;
+    padding: 0 2rem 3rem;
     flex-direction: column;
-    align-items: center;
+    align-items: flex-start;
     gap: 2rem;
   }
   .results.visible { display: flex; }
+  .col-video { width: 100%; max-width: 720px; }
   .col-table { width: 100%; }
-  .col-video { width: 100%; max-width: 680px; }
 
   .section-label {
     font-size: 0.7rem;
@@ -297,21 +299,21 @@
 
 <!-- Results state -->
 <div class="results" id="results-section">
-  <div class="col-table">
-    <div class="section-label">Rep Summary</div>
-    <div class="table-wrap" id="table-wrap">
-      <div style="color:#4b5563; font-size:0.85rem;">Processing…</div>
+  <div class="col-video">
+    <div class="section-label">Annotated Playback</div>
+    <div class="video-wrap" id="video-wrap">
+      <img id="mjpeg-stream" src="" alt="stream">
+      <div class="status-overlay" id="status-overlay"></div>
     </div>
     <div class="action-row" id="action-row" style="display:none">
       <a id="download-btn" class="btn-sm btn-primary" href="#" download="whitelights_annotated.mp4">Download MP4</a>
       <button class="btn-sm btn-ghost" id="reset-btn">Analyze Another</button>
     </div>
   </div>
-  <div class="col-video">
-    <div class="section-label">Annotated Playback</div>
-    <div class="video-wrap" id="video-wrap">
-      <img id="mjpeg-stream" src="" alt="stream">
-      <div class="status-overlay" id="status-overlay"></div>
+  <div class="col-table">
+    <div class="section-label">Rep Summary</div>
+    <div class="table-wrap" id="table-wrap">
+      <div style="color:#4b5563; font-size:0.85rem;">Processing…</div>
     </div>
   </div>
 </div>
@@ -386,8 +388,11 @@
 
   function setFile(f) {
     selectedFile = f;
-    fileChosen.textContent = f.name;
     analyzeBtn.disabled = false;
+    dropZone.classList.add('has-file');
+    dropZone.querySelector('.drop-icon').textContent = '✓';
+    dropZone.querySelector('.drop-label').innerHTML = `<strong>${f.name}</strong>`;
+    dropZone.querySelector('.drop-hint').textContent = `${(f.size / 1024 / 1024).toFixed(1)} MB · click to change`;
   }
 
   // ── Upload & start ──
@@ -519,9 +524,13 @@
     currentJobId  = null;
     selectedFile  = null;
     streamStarted = false;
-    fileChosen.textContent = '';
+    tableRendered = false;
     fileInput.value = '';
     analyzeBtn.disabled = true;
+    dropZone.classList.remove('has-file');
+    dropZone.querySelector('.drop-icon').textContent = '⬆';
+    dropZone.querySelector('.drop-label').innerHTML = '<strong>Choose a video</strong> or drag it here';
+    dropZone.querySelector('.drop-hint').textContent = 'MP4 or MOV · side-profile angle';
 
     // Restore MJPEG img element if it was replaced
     const videoEl = document.querySelector('#video-wrap video');
