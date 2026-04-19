@@ -161,7 +161,7 @@ Computed using smoothed `draw_frames` landmarks so the displayed arc on video ma
 
 Angle of the hip-crease → knee-top line against horizontal, at the best sustained depth position.
 
-Scans all frames in the rep for runs of ≥ `MIN_DEPTH_FRAMES` consecutive frames where `hc_y > kt_y`. Returns the most negative angle within any qualifying run (most negative = deepest below parallel). Falls back to best single-frame angle if no qualifying run exists.
+Scans all frames in the rep for runs of ≥ `MIN_DEPTH_FRAMES` consecutive frames where `hc_y > kt_y`. Returns the most positive (deepest) angle within any qualifying run. Falls back to best single-frame angle if no qualifying run exists.
 
 Convention: **positive = hip crease below knee top (at depth)**, negative = above parallel.
 
@@ -199,6 +199,7 @@ Columns: one per rep. Rows:
 | Row | Content |
 |---|---|
 | Result | PASS / FAIL / BORDERLINE |
+| Descent time | Full eccentric phase (seconds) |
 | Hole time | Duration of first 25% of ascent (seconds) |
 | Ascent time | Full concentric phase (seconds) |
 | Depth angle | Hip-crease→knee-top angle vs horizontal at best sustained depth (degrees) |
