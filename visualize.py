@@ -461,12 +461,15 @@ def _analyze(cap, rotation, fps, force_side=None):
 # ── Pass 2: rendering ─────────────────────────────────────────────────────────
 
 def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
-            smooth_hip_ys, knee_ys, valid_frame_indices, output_path):
+            smooth_hip_ys, knee_ys, valid_frame_indices, output_path,
+            frame_callback=None):
     """
     Re-read the video frame-by-frame, draw all overlays.
     Writes annotated MP4 if SAVE_VIDEO is True.
-    Shows a live cv2 window if SHOW_LIVE is True.
+    Shows a live cv2 window if SHOW_LIVE is True (ignored when frame_callback set).
     Auto-opens the saved file after render if SAVE_VIDEO is True.
+    frame_callback: optional callable(bytes | None) — called with each JPEG-encoded
+        frame during render, then called once with None when done.
     """
     # Read one frame to get dimensions
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -543,7 +546,10 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
         if SAVE_VIDEO:
             out.write(frame)
 
-        if SHOW_LIVE:
+        if frame_callback is not None:
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            frame_callback(jpeg.tobytes())
+        elif SHOW_LIVE:
             cv2.imshow("Squat Depth", frame)
             if cv2.waitKey(delay_ms) & 0xFF == ord("q"):
                 break
@@ -561,7 +567,9 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
         print(f"  Saved: {output_path}")
         subprocess.run(["open", output_path])
 
-    if SHOW_LIVE:
+    if frame_callback is not None:
+        frame_callback(None)  # sentinel — stream closed
+    elif SHOW_LIVE:
         cv2.destroyAllWindows()
 
 
