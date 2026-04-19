@@ -114,10 +114,16 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
         job["state"] = "rendering"
 
         frame_interval = 1.0 / fps
+        _last_frame_time: list[float] = [time.monotonic()]
 
         def _cb(data: bytes | None) -> None:
             if data is not None:
-                time.sleep(frame_interval)
+                now = time.monotonic()
+                elapsed = now - _last_frame_time[0]
+                sleep_for = frame_interval - elapsed
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                _last_frame_time[0] = time.monotonic()
             job["queue"].put(data)
 
         cap2 = cv2.VideoCapture(input_path)
