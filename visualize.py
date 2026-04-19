@@ -565,7 +565,8 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
     if SAVE_VIDEO:
         out.release()
         print(f"  Saved: {output_path}")
-        subprocess.run(["open", output_path])
+        if frame_callback is None:
+            subprocess.run(["open", output_path])
 
     if frame_callback is not None:
         frame_callback(None)  # sentinel — stream closed
