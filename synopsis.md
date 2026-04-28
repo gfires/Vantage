@@ -14,8 +14,9 @@ Built for the Rice powerlifting team (low-bar focus).
 | Video I/O | OpenCV (`opencv-python >= 4.8`) |
 | Numerical ops | NumPy, SciPy (`find_peaks` for rep segmentation) |
 | Runtime | Python 3.12 (`/usr/local/bin/python3.12`) |
-| Future UI | Streamlit (in requirements, not yet built) |
-| Future AI | Anthropic SDK (in requirements, not yet built) |
+| Web backend | FastAPI + Uvicorn (`api.py`) |
+| Web frontend | Plain HTML/CSS/JS (`index.html`) — no framework |
+| Future AI | Anthropic SDK (in requirements, not yet wired) |
 
 ---
 
@@ -27,6 +28,8 @@ vantage/
 ├── visualize.py            # Annotated video renderer + rep segmentation + table output
 ├── metrics.py              # Coaching metrics: tempo, tibial angle, depth angle
 ├── params.py               # Single source of truth for all tunable constants
+├── api.py                  # FastAPI web backend (upload, MJPEG stream, status, download)
+├── index.html              # Single-page frontend (upload UI, live stream, rep table)
 ├── debug_single.py         # CLI debug tool (prints per-frame hip/knee values)
 ├── requirements.txt
 ├── .gitignore              # Excludes tests/raw_videos/, tests/annotated_videos/, models/
@@ -184,9 +187,19 @@ Convention: **positive = hip crease below knee top (at depth)**, negative = abov
 ### Output toggles (top of `visualize.py`)
 
 ```python
-SAVE_VIDEO = True    # write annotated MP4 to tests/annotated_videos/, auto-open after
-SHOW_LIVE  = True    # display in cv2.imshow() window while rendering
+SAVE_VIDEO = True    # write annotated MP4 to tests/annotated_videos/
+SHOW_LIVE  = True    # display in cv2.imshow() window while rendering (CLI only)
 ```
+
+Auto-open in QuickTime fires only on the CLI path (`frame_callback is None`), not from the web API.
+
+### `frame_callback` parameter
+
+`_render` accepts an optional `frame_callback(bytes | None)`. When set:
+- Each rendered frame is JPEG-encoded at quality 85 and passed to the callback.
+- A final `None` call signals end-of-stream.
+- `cv2.imshow` and QuickTime auto-open are both suppressed.
+- Used by `api.py` to stream frames to the browser via MJPEG.
 
 ---
 
@@ -266,6 +279,17 @@ Real-time budget at 28fps is 36ms/frame. The render loop is well within budget; 
 
 ## Usage
 
+### Web UI
+
+```bash
+python3.12 -m uvicorn api:app --reload --port 8000
+# open http://localhost:8000
+```
+
+Upload a side-profile squat video. The UI streams annotated frames live as they render (MJPEG), then swaps to a pauseable H.264 player when done. Rep summary table appears as soon as analysis completes.
+
+### CLI
+
 ```bash
 # Single rep, force right side (most common — lifter faces left toward camera)
 python3.12 visualize.py tests/raw_videos/valid_1.MOV --side right
@@ -280,15 +304,46 @@ python3.12 debug_single.py tests/raw_videos/valid_1.MOV
 python3.12 tests/test_depth.py
 ```
 
-Outputs go to `tests/annotated_videos/`:
-- `<stem>_annotated.mp4` — annotated video
+CLI outputs go to `tests/annotated_videos/`:
+- `<stem>_annotated.mp4` — annotated video (auto-opens in QuickTime)
 - `<stem>_table.txt` — rep summary table
+
+---
+
+## Web Architecture (`api.py` + `index.html`)
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Serve `index.html` |
+| `POST` | `/upload` | Save video, start background job, return `{"job_id", "duration_s"}` |
+| `GET` | `/stream/{job_id}` | MJPEG stream (`multipart/x-mixed-replace`) — live annotated frames |
+| `GET` | `/status/{job_id}` | `{"state": "analyzing"\|"rendering"\|"done"\|"error", "reps": [...]}` |
+| `GET` | `/download/{job_id}` | Serve final H.264 MP4 |
+
+### Job lifecycle
+
+1. Upload saves file to a temp dir, probes `duration_s` from the file header, spawns a background thread.
+2. Thread runs `_analyze` → sets `state=rendering`, stores serialised rep data → calls `_render` with `frame_callback`.
+3. `frame_callback` puts each JPEG frame on a `queue.Queue`; `/stream` drains it as MJPEG.
+4. Render complete → `state=done`, output MP4 available at `/download`.
+
+### Frontend UX
+
+- **Upload state**: dark drag-drop zone; updates in place to show filename + size when a file is chosen.
+- **Processing state**: progress bar runs 0→100% over `2/3 * duration_s` (Analyzing), then holds label at "Rendering…" until first MJPEG frame arrives, then disappears.
+- **Results state**: live MJPEG stream plays in real-time (frame-accurate throttle: `sleep(max(0, 1/fps − render_time))`); rep table appears as soon as analysis finishes. On render complete, MJPEG swaps to a pauseable H.264 `<video>` element.
+
+### MJPEG playback speed
+
+Frames are throttled in the callback: measure actual render time per frame, sleep only the remainder of `1/fps`. This keeps playback at real-time without over-sleeping.
 
 ---
 
 ## What's Not Yet Built
 
-- `app.py` — Streamlit UI (upload → analyze → display results)
 - Claude AI coaching breakdown (Anthropic SDK is in requirements, not wired)
 - Multi-rep support in `depth_detector.py`'s `analyze_video()` — it's still single-rep; multi-rep logic lives only in `visualize.py`
 - GPU inference — MediaPipe BlazePose supports CoreML/GPU delegates; would reduce extraction from ~21.8ms to ~2–5ms/frame
+- Side selection UI — currently hardcoded to `force_side="right"` in `api.py`

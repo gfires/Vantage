@@ -21,7 +21,6 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
 from params import (
-    VISIBILITY_THRESHOLD,
     MIN_DEPTH_FRAMES,
     SMOOTHING_WINDOW,
     CLOSE_THRESHOLD,
@@ -197,8 +196,8 @@ def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
                 lm = result.pose_landmarks[0]  # first (and only) detected person
                 frames_data.append({
                     "frame_idx": frame_idx,
-                    "left_hip":       (lm[LEFT_HIP].x * w,       lm[LEFT_HIP].y * h,       lm[LEFT_HIP].visibility),
-                    "right_hip":      (lm[RIGHT_HIP].x * w,      lm[RIGHT_HIP].y * h,      lm[RIGHT_HIP].visibility),
+                    "left_hip":       (lm[LEFT_HIP].x * w,       lm[LEFT_HIP].y * h,       lm[LEFT_HIP].visibility,  lm[LEFT_HIP].z),
+                    "right_hip":      (lm[RIGHT_HIP].x * w,      lm[RIGHT_HIP].y * h,      lm[RIGHT_HIP].visibility, lm[RIGHT_HIP].z),
                     "left_knee":      (lm[LEFT_KNEE].x * w,       lm[LEFT_KNEE].y * h,      lm[LEFT_KNEE].visibility),
                     "right_knee":     (lm[RIGHT_KNEE].x * w,      lm[RIGHT_KNEE].y * h,     lm[RIGHT_KNEE].visibility),
                     "left_wrist":     (lm[LEFT_WRIST].x * w,      lm[LEFT_WRIST].y * h),
@@ -220,19 +219,18 @@ def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
 
 def _select_side(valid_frames: list) -> str | None:
     """
-    Pick which side's landmarks to use based on average visibility.
-    LEFT_HIP visibility > 0.7 across frames → use left side.
-    Else RIGHT_HIP visibility > 0.7 → use right side.
-    Else → indeterminate (camera not side-profile enough).
-    """
-    left_vis = np.mean([f["left_hip"][2] for _, f in valid_frames])
-    right_vis = np.mean([f["right_hip"][2] for _, f in valid_frames])
+    Pick which side's landmarks to use by selecting the hip closer to the camera.
 
-    if left_vis > VISIBILITY_THRESHOLD:
-        return "left"
-    elif right_vis > VISIBILITY_THRESHOLD:
-        return "right"
-    return None
+    Uses the z-coordinate from the first valid frame (negative = closer to camera).
+    Camera-to-subject geometry is static, so a single frame snapshot is sufficient.
+    Returns None when both hips are equidistant or no valid frame is available.
+    """
+    _, first = valid_frames[0]
+    left_z  = first["left_hip"][3]
+    right_z = first["right_hip"][3]
+    if left_z == right_z:
+        return None
+    return "left" if left_z < right_z else "right"
 
 
 def _rolling_average(values: list, window: int) -> list:

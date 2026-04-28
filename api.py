@@ -24,7 +24,7 @@ from depth_detector import _ensure_model, _get_rotation
 from params import HOLE_EXIT_FRACTION, TIBIAL_NOTE_DEG, TIBIAL_WARN_DEG
 from visualize import _analyze, _render
 
-app = FastAPI()
+app = FastAPI()  # main application instance
 
 # ── Job store ─────────────────────────────────────────────────────────────────
 
