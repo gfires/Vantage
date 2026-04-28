@@ -243,9 +243,9 @@ MIN_DESCENT_THRESHOLD = 0.10   # min hip drop fraction to count as a rep
 DRAW_SMOOTHING        = 3      # rolling average for skeleton/marker rendering (display only)
 
 # Tempo thresholds
-DESCENT_FAST_S        = 1.5
+DESCENT_FAST_S        = 1.3
 DESCENT_SLOW_S        = 4.0
-GRIND_RATIO           = 1.5    # ascent > descent × this → GRIND
+GRIND_RATIO           = 2    # ascent > descent × this → GRIND
 
 # Tibial angle (low-bar calibrated)
 TIBIAL_NOTE_DEG       = 25.0   # WATCH KNEES
