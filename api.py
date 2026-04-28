@@ -24,7 +24,7 @@ from depth_detector import _ensure_model, _get_rotation
 from params import HOLE_EXIT_FRACTION, TIBIAL_NOTE_DEG, TIBIAL_WARN_DEG
 from visualize import _analyze, _render
 
-app = FastAPI()
+app = FastAPI()  # main application instance
 
 # ── Job store ─────────────────────────────────────────────────────────────────
 
@@ -35,7 +35,7 @@ def _new_job() -> tuple[str, dict]:
     job_id = str(uuid.uuid4())
     job = {
         "state": "analyzing",
-        "queue": queue.Queue(),
+        "queue": queue.Queue(maxsize=30),  # ~1s buffer at 30fps; bounds memory, enables disconnect detection
         "reps": None,
         "fps": None,
         "duration_s": None,
@@ -59,17 +59,15 @@ def _rep_warnings(rep: dict) -> list[str]:
     return warns
 
 
-def _hole_s(rep: dict) -> float:
-    t = rep.get("tempo", {})
+def _hole_s(rep: dict, fps: float) -> float:
     bottom = rep["bottom_global"]
     end = rep["end_global"]
     asc_total = max(end - bottom, 1)
     hole_frames = max(1, int(asc_total * HOLE_EXIT_FRACTION))
-    fps_approx = asc_total / max(t.get("ascent_s", 1) or 1, 1e-6)
-    return round(hole_frames / fps_approx, 2)
+    return round(hole_frames / fps, 2)
 
 
-def _serialise_reps(reps: list) -> list[dict]:
+def _serialise_reps(reps: list, fps: float) -> list[dict]:
     out = []
     for i, rep in enumerate(reps, 1):
         t = rep["tempo"]
@@ -78,7 +76,7 @@ def _serialise_reps(reps: list) -> list[dict]:
             "rep": i,
             "result": rep["result"].upper(),
             "descent_s": round(t.get("descent_s", 0), 2),
-            "hole_s": _hole_s(rep),
+            "hole_s": _hole_s(rep, fps),
             "ascent_s": round(t.get("ascent_s", 0), 2),
             "depth_angle": round(rep["depth_angle"], 1) if rep.get("depth_angle") is not None else None,
             "max_shin": round(tib["max_angle"], 0) if tib.get("max_angle") is not None else None,
@@ -100,17 +98,20 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
         rotation = _get_rotation(cap)
         job["fps"] = fps
 
-        analysis = _analyze(cap, rotation, fps, force_side="right")
+        analysis = _analyze(cap, rotation, fps, force_side=None)
         cap.release()
 
         if analysis is None:
             job["state"] = "error"
             job["error"] = "Could not detect a squat. Check camera angle."
-            job["queue"].put(None)
+            try:
+                job["queue"].put_nowait(None)
+            except queue.Full:
+                pass
             return
 
         frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
-        job["reps"] = _serialise_reps(reps)
+        job["reps"] = _serialise_reps(reps, fps)
         job["state"] = "rendering"
 
         frame_interval = 1.0 / fps
@@ -124,7 +125,10 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
                 if sleep_for > 0:
                     time.sleep(sleep_for)
                 _last_frame_time[0] = time.monotonic()
-            job["queue"].put(data)
+            try:
+                job["queue"].put(data, timeout=5.0)
+            except queue.Full:
+                raise RuntimeError("stream consumer disconnected")
 
         cap2 = cv2.VideoCapture(input_path)
         cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
@@ -143,7 +147,10 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
     except Exception as exc:
         job["state"] = "error"
         job["error"] = str(exc)
-        job["queue"].put(None)
+        try:
+            job["queue"].put_nowait(None)
+        except queue.Full:
+            pass
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -162,7 +169,8 @@ async def upload(file: UploadFile):
     output_path = str(Path(tmp_dir) / "annotated.mp4")
 
     with open(input_path, "wb") as f:
-        f.write(await file.read())
+        async for chunk in file:
+            f.write(chunk)
 
     # Probe duration from file header — instantaneous, no decoding
     _cap = cv2.VideoCapture(input_path)
@@ -191,16 +199,31 @@ def stream(job_id: str):
     job = jobs[job_id]
 
     def _generate():
-        while True:
-            data = job["queue"].get()
-            if data is None:
-                break
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n"
-                + data +
-                b"\r\n"
-            )
+        try:
+            while True:
+                try:
+                    data = job["queue"].get(timeout=10.0)
+                except queue.Empty:
+                    break
+                if data is None:
+                    break
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + data +
+                    b"\r\n"
+                )
+        except GeneratorExit:
+            # Client disconnected — drain queue so producer thread unblocks and exits
+            while True:
+                try:
+                    job["queue"].get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                job["queue"].put_nowait(None)
+            except queue.Full:
+                pass
 
     return StreamingResponse(
         _generate(),

@@ -536,12 +536,14 @@ def _render(cap, rotation, fps, frames_data, draw_frames, side, reps,
             _draw_coaching_panel(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
             _draw_rep_counter(frame, rep_num, len(reps), w, h)
+            _draw_side_badge(frame, side, w, h)
         else:
             _draw_graph(frame, smooth_hip_ys, knee_ys, None, h)
             _draw_metrics_hud(frame, cur_rep, frame_idx, w)
             _draw_coaching_panel(frame, cur_rep, frame_idx, w)
             _draw_lights(frame, cur_rep, frame_idx, h)
             _draw_rep_counter(frame, rep_num, len(reps), w, h)
+            _draw_side_badge(frame, side, w, h)
 
         if SAVE_VIDEO:
             out.write(frame)
@@ -698,6 +700,22 @@ def _rep_counter_coords(frame_w, frame_h, rep_num, total_reps):
     return x, y, tw, th, baseline, label
 
 
+def _side_badge_coords(frame_w, frame_h, side):
+    """Return (x0, y0, x1, y1, tx, ty) for the side badge box and text anchor."""
+    label = f"SIDE: {side.upper()}" if side else "SIDE: ?"
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thickness = 0.5, 1
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+    PAD = 12
+    x1 = frame_w - PAD
+    y1 = frame_h - PAD - 30   # sit above the rep counter row
+    x0 = x1 - tw - 10
+    y0 = y1 - th - baseline - 6
+    tx = x0 + 5
+    ty = y1 - baseline - 2
+    return x0, y0, x1, y1, tx, ty, label
+
+
 def _metrics_hud_coords(frame_w):
     """Return (x0, y0, w, h) for the metrics HUD panel (top-right).
     Rows: DESC, ASC, HOLE, MCV, STICK = 5 rows × 16px + 8px padding = 88px."""
@@ -776,6 +794,13 @@ def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
         return
     x, y, _, _, _, label = _rep_counter_coords(frame_w, frame_h, rep_num, total_reps)
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2, cv2.LINE_AA)
+
+
+def _draw_side_badge(frame, side, frame_w, frame_h):
+    """Black box with white text in the bottom-right showing which side is being tracked."""
+    x0, y0, x1, y1, tx, ty, label = _side_badge_coords(frame_w, frame_h, side)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.putText(frame, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
 
 
 
