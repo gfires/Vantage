@@ -51,11 +51,6 @@ from params import (
     HOLE_EXIT_FRACTION,
     HIP_CREASE_FRAC,
     KNEE_TOP_OVERSHOOT,
-    DESCENT_FAST_S,
-    DESCENT_SLOW_S,
-    GRIND_RATIO,
-    HOLE_MCV_WARN,
-    TIBIAL_WARN_DEG,
 )
 
 
@@ -192,7 +187,43 @@ def _build_tempo(
         hole_exit_vel, hole_mcv_ratio, flags.
         Matches the schema returned by metrics.compute_tempo().
     """
-    ...
+    descent_s = descent_frames / fps
+    ascent_s  = ascent_frames  / fps
+
+    # Per-frame normalised velocity during ascent (length = len(ascent_hc_ys) - 1).
+    # hip_y decreases as the lifter rises → negate so positive = moving upward.
+    # Normalised by frame_height so values are comparable across resolutions.
+    if len(ascent_hc_ys) >= 2:
+        velocity = [
+            -(ascent_hc_ys[i] - ascent_hc_ys[i - 1]) / frame_height * fps
+            for i in range(1, len(ascent_hc_ys))
+        ]
+    else:
+        velocity = []
+
+    valid_v = [v for v in velocity if v == v]  # exclude any NaN placeholders
+
+    mean_concentric_vel = round(sum(valid_v) / len(valid_v), 4) if valid_v else None
+
+    # Hole-exit velocity: mean over first HOLE_EXIT_FRACTION of ascent frames.
+    hole_exit_n   = max(1, int(len(velocity) * HOLE_EXIT_FRACTION))
+    hole_exit_vals = valid_v[:hole_exit_n]
+    hole_exit_vel  = round(sum(hole_exit_vals) / len(hole_exit_vals), 4) if hole_exit_vals else None
+
+    hole_mcv_ratio = None
+    if hole_exit_vel is not None and mean_concentric_vel and mean_concentric_vel > 1e-6:
+        hole_mcv_ratio = round(hole_exit_vel / mean_concentric_vel, 3)
+
+    return {
+        "descent_s":           round(descent_s, 2),
+        "ascent_s":            round(ascent_s, 2),
+        "velocity":            [round(v, 4) for v in velocity],
+        "mean_concentric_vel": mean_concentric_vel,
+        "hole_exit_vel":       hole_exit_vel,
+        "hole_mcv_ratio":      hole_mcv_ratio,
+        # flags intentionally absent — caller passes this dict to compute_flags()
+        # which owns all flag logic and returns them separately.
+    }
 
 
 def _build_tibial(

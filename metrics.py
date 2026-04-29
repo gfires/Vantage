@@ -16,6 +16,7 @@ from params import (
     DESCENT_SLOW_S,
     GRIND_RATIO,
     HOLE_EXIT_FRACTION,
+    TIBIAL_NOTE_DEG,
     TIBIAL_WARN_DEG,
     HOLE_MCV_WARN,
 )
@@ -230,6 +231,55 @@ def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None
 
     # Fallback: best single-frame angle across the whole rep
     return round(max(a for _, a, _ in frame_angles), 1)
+
+
+def compute_flags(tempo: dict, tibial: dict) -> list[str]:
+    """
+    Derive all coaching flags for a completed rep from its tempo and tibial dicts.
+
+    Single source of truth for flag logic — replaces the duplicate _rep_warnings
+    functions previously in api.py and visualize.py.
+
+    Checks performed:
+      - Descent speed: FAST DESC / SLOW DESC
+      - Ascent/descent ratio: GRIND
+      - Hole-exit velocity vs MCV: WEAK HOLE
+      - Peak tibial angle: KNEES TOO FORWARD / KNEES SLIGHTLY FORWARD
+
+    Args:
+        tempo:  dict as returned by compute_tempo() or _build_tempo().
+                Keys used: descent_s, ascent_s, hole_mcv_ratio.
+        tibial: dict as returned by compute_tibial_angle() or _build_tibial().
+                Keys used: max_angle.
+
+    Returns:
+        List of flag strings, may be empty.  Order: tempo flags first, tibial last.
+    """
+    flags = []
+
+    descent_s = tempo.get("descent_s") or 0.0
+    ascent_s  = tempo.get("ascent_s")  or 0.0
+
+    if descent_s < DESCENT_FAST_S:
+        flags.append("FAST DESC")
+    elif descent_s > DESCENT_SLOW_S:
+        flags.append("SLOW DESC")
+
+    if descent_s > 0 and ascent_s > descent_s * GRIND_RATIO:
+        flags.append("GRIND")
+
+    hole_mcv_ratio = tempo.get("hole_mcv_ratio")
+    if hole_mcv_ratio is not None and hole_mcv_ratio < HOLE_MCV_WARN:
+        flags.append("WEAK HOLE")
+
+    max_tib = tibial.get("max_angle")
+    if max_tib is not None:
+        if max_tib > TIBIAL_WARN_DEG:
+            flags.append("KNEES TOO FORWARD")
+        elif max_tib > TIBIAL_NOTE_DEG:
+            flags.append("KNEES SLIGHTLY FORWARD")
+
+    return flags
 
 
 def compute_back_angle(frames_data: list, side: str) -> dict:

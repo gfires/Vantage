@@ -46,7 +46,7 @@ from params import (
     HOLE_MCV_NOTE,
     HOLE_EXIT_FRACTION,
 )
-from metrics import compute_tempo, compute_tibial_angle, compute_depth_angle
+from metrics import compute_tempo, compute_tibial_angle, compute_depth_angle, compute_flags
 
 # ── Colors (BGR) ──────────────────────────────────────────────────────────────
 WHITE   = (255, 255, 255)
@@ -71,15 +71,8 @@ SHOW_LIVE   = True   # display frames in a cv2 window as they are rendered
 # ── Rep table ─────────────────────────────────────────────────────────────────
 
 def _rep_warnings(rep: dict) -> str:
-    """Collect all warnings for a rep: tempo flags + tibial threshold breaches."""
-    warns = list(rep["tempo"].get("flags", []))
-    max_tib = rep["tibial"].get("max_angle")
-    if max_tib is not None:
-        if max_tib > TIBIAL_WARN_DEG:
-            warns.append("KNEES TOO FORWARD")
-        elif max_tib > TIBIAL_NOTE_DEG:
-            warns.append("KNEES SLIGHTLY FORWARD")
-    return ", ".join(warns) or "--"
+    """Collect all warnings for a rep as a display string for the rep table."""
+    return ", ".join(compute_flags(rep["tempo"], rep["tibial"])) or "--"
 
 
 def _output_rep_table(reps: list, output_path: str) -> None:
