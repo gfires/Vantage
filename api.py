@@ -169,8 +169,7 @@ async def upload(file: UploadFile):
     output_path = str(Path(tmp_dir) / "annotated.mp4")
 
     with open(input_path, "wb") as f:
-        async for chunk in file:
-            f.write(chunk)
+        f.write(await file.read())
 
     # Probe duration from file header — instantaneous, no decoding
     _cap = cv2.VideoCapture(input_path)
