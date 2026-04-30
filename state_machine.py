@@ -51,7 +51,10 @@ from params import (
     HOLE_EXIT_FRACTION,
     HIP_CREASE_FRAC,
     KNEE_TOP_OVERSHOOT,
+    TIBIAL_WARN_DEG,
 )
+from depth_detector import _max_consecutive_true
+from metrics import compute_flags
 
 
 # ── Phase enum ────────────────────────────────────────────────────────────────
@@ -206,8 +209,8 @@ def _build_tempo(
     mean_concentric_vel = round(sum(valid_v) / len(valid_v), 4) if valid_v else None
 
     # Hole-exit velocity: mean over first HOLE_EXIT_FRACTION of ascent frames.
-    hole_exit_n   = max(1, int(len(velocity) * HOLE_EXIT_FRACTION))
-    hole_exit_vals = valid_v[:hole_exit_n]
+    hole_exit_n    = max(1, int(len(velocity) * HOLE_EXIT_FRACTION))
+    hole_exit_vals = [v for v in velocity[:hole_exit_n] if v == v]  # filter NaN from window
     hole_exit_vel  = round(sum(hole_exit_vals) / len(hole_exit_vals), 4) if hole_exit_vals else None
 
     hole_mcv_ratio = None
@@ -242,7 +245,17 @@ def _build_tibial(
         Dict with keys: angles, max_angle, max_frame, flagged.
         Matches the schema returned by metrics.compute_tibial_angle().
     """
-    ...
+    if not per_frame_angles:
+        return {"angles": {}, "max_angle": None, "max_frame": None, "flagged": False}
+
+    max_frame = max(per_frame_angles, key=lambda k: per_frame_angles[k])
+    max_angle = per_frame_angles[max_frame]
+    return {
+        "angles":    {k: round(v, 1) for k, v in per_frame_angles.items()},
+        "max_angle": max_angle,
+        "max_frame": max_frame,
+        "flagged":   max_angle > TIBIAL_WARN_DEG,
+    }
 
 
 def _build_depth_result(
@@ -264,7 +277,13 @@ def _build_depth_result(
     Returns:
         "pass" | "fail" | "borderline"
     """
-    ...
+    # Count consecutive depth frames to determine pass/fail.
+    max_consec = _max_consecutive_true(depth_flags)
+    if max_consec >= MIN_DEPTH_FRAMES:
+        return "pass"
+    if min_gap_px < (frame_height * CLOSE_THRESHOLD) or max_consec > 0:
+        return "borderline"
+    return "fail"
 
 
 # ── RepStateMachine ───────────────────────────────────────────────────────────
@@ -319,8 +338,8 @@ class RepStateMachine:
         self._prev_smooth:     float | None = None  # previous smoothed hip_y
 
         # ── STANDING state ────────────────────────────────────────────────────
-        self._standing_peak:   float | None = None  # max smoothed hip_y while standing
-                                                     # (large = tall = standing position)
+        self._standing_peak:   float | None = None  # min smoothed hip_y while standing
+                                                     # (small = tall = standing position)
 
         # ── DESCENDING state ──────────────────────────────────────────────────
         self._bottom_candidate_val:   float | None = None  # smoothed hip_y at candidate bottom
@@ -394,7 +413,7 @@ class RepStateMachine:
         """
         Advance one frame while in STANDING phase.
 
-        Tracks the rolling maximum of the smoothed hip_y signal (the standing
+        Tracks the rolling minimum of the smoothed hip_y signal (the standing
         reference height).  Transitions to DESCENDING when the signal drops
         MIN_HOLD_FRAMES consecutive frames AND has fallen more than
         MIN_DESCENT_THRESHOLD * frame_height below the standing peak.
@@ -413,7 +432,37 @@ class RepStateMachine:
         Side effects:
             May set self.phase = Phase.DESCENDING and self.rep_start.
         """
-        ...
+        # Track rolling min of smooth hip_y while standing.
+        # Small hip_y = high physical position = standing reference.
+        # standing_peak holds the lowest (most upright) hip_y seen while standing,
+        # which is the baseline from which we measure descent depth.
+        if self._standing_peak is None or smooth_val < self._standing_peak:
+            self._standing_peak = smooth_val
+
+        if self._prev_smooth is None:
+            return None
+
+        # Count consecutive frames where hip_y is increasing (hips going lower = descent).
+        if smooth_val > self._prev_smooth:
+            self._hold_count += 1
+        else:
+            self._hold_count = 0
+
+        if self._hold_count >= MIN_HOLD_FRAMES:
+            # Check that the drop is significant: hip_y must exceed standing baseline
+            # by at least MIN_DESCENT_THRESHOLD * frame_height.
+            if (smooth_val - self._standing_peak) >= MIN_DESCENT_THRESHOLD * self.frame_height:
+                # Retroactive: descent started MIN_HOLD_FRAMES ago
+                self.rep_start  = frame_idx - MIN_HOLD_FRAMES + 1
+                self.phase      = Phase.DESCENDING
+                self._hold_count = 0
+                # Seed the bottom candidate at the current frame
+                self._bottom_candidate_val   = smooth_val
+                self._bottom_candidate_frame = frame_idx
+                self._bottom_fdata           = fdata
+
+        return None
+
 
 
     def _step_descending(
@@ -441,7 +490,37 @@ class RepStateMachine:
         Side effects:
             May set self.phase = Phase.ASCENDING and self.bottom_frame.
         """
-        ...
+        # Track rolling maximum — large hip_y = lowest physical position = squat bottom.
+        if (self._bottom_candidate_val is None
+                or smooth_val >= self._bottom_candidate_val):
+            self._bottom_candidate_val   = smooth_val
+            self._bottom_candidate_frame = frame_idx
+            self._bottom_fdata           = fdata
+
+        if self._prev_smooth is None:
+            return None
+
+        # Count consecutive frames where hip_y is decreasing (hips rising = ascent).
+        if smooth_val < self._prev_smooth:
+            self._hold_count += 1
+        else:
+            self._hold_count = 0
+
+        if self._hold_count >= MIN_HOLD_FRAMES:
+            # Retroactively declare bottom at the candidate (the true minimum)
+            self.bottom_frame = self._bottom_candidate_frame
+            self.phase        = Phase.ASCENDING
+            self._hold_count  = 0
+            # Seed ascent accumulator with hip-crease Y at the bottom frame
+            if self._bottom_fdata is not None:
+                shoulder = self._bottom_fdata[f"{self.side}_shoulder"]
+                hip      = self._bottom_fdata[f"{self.side}_hip"]
+                hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+                self._ascent_hc_ys = [hc_y]
+            else:
+                self._ascent_hc_ys = []
+
+        return None
 
 
     def _step_ascending(
@@ -468,7 +547,33 @@ class RepStateMachine:
         Side effects:
             May set self.phase = Phase.STANDING, reset all _rep accumulators.
         """
-        ...
+        # Accumulate hip-crease Y for velocity computation
+        shoulder = fdata[f"{self.side}_shoulder"]
+        hip      = fdata[f"{self.side}_hip"]
+        hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+        self._ascent_hc_ys.append(hc_y)
+        self._ascent_frames += 1
+
+        # Recovered fraction: how far hip_y has returned toward standing (small) value.
+        # bottom_candidate_val is large (hips low); standing_peak is small (hips high).
+        # recovered = (bottom_val - smooth_val) / (bottom_val - standing_peak)
+        bottom_val    = self._bottom_candidate_val or 0.0
+        standing_ref  = self._standing_peak or 0.0
+        denom = bottom_val - standing_ref
+        if denom > 1e-6:
+            recovered = (bottom_val - smooth_val) / denom
+        else:
+            recovered = 0.0
+
+        if recovered > 0.9:
+            completed = self._finalise_rep(frame_idx)
+            self._reset_rep_accumulators()
+            self._standing_peak = smooth_val
+            self.phase          = Phase.STANDING
+            self._hold_count    = 0
+            return completed
+
+        return None
 
 
     # ── Internal helpers ──────────────────────────────────────────────────────
@@ -487,7 +592,8 @@ class RepStateMachine:
         Returns:
             Smoothed hip_y (mean of buffer contents).
         """
-        ...
+        self._hip_buf.append(hip_y)
+        return sum(self._hip_buf) / len(self._hip_buf)
 
 
     def _accumulate_rep_frame(
@@ -506,7 +612,19 @@ class RepStateMachine:
             fdata:      landmark dict for this frame.
             smooth_val: current smoothed hip_y (unused here, available if needed).
         """
-        ...
+        hc_y, kt_y, _, _ = _estimated_markers(fdata, self.side)
+        at_depth = hc_y > kt_y
+        self._depth_flags.append(at_depth)
+
+        gap = abs(hc_y - kt_y)
+        if gap < self._min_gap_px:
+            self._min_gap_px = gap
+
+        angle = _tibial_angle(fdata, self.side)
+        self._tibial_angles[frame_idx] = round(angle, 1)
+
+        if self.phase == Phase.DESCENDING:
+            self._descent_frames += 1
 
 
     def _handle_none_frame(self, frame_idx: int) -> None:
@@ -515,9 +633,9 @@ class RepStateMachine:
 
         None frames are treated as neutral — they do not advance hold counters
         in either direction and do not reset them.  The machine holds its
-        current transition progress across gaps.  A depth_flag of False is
-        appended for None frames inside active reps (conservative: no depth
-        credit for frames where pose is invisible).
+        current transition progress across gaps.  None frames are skipped
+        entirely: no depth_flag is appended, preserving the rep's flag sequence
+        as if the missing frame did not occur.
 
         Args:
             frame_idx: current (tail) frame index.
@@ -525,7 +643,9 @@ class RepStateMachine:
         Returns:
             Always None.
         """
-        ...
+        # Hold counters are not advanced or reset on None frames (neutral).
+        # No depth_flag appended — the frame is simply skipped.
+        return None
 
 
     def _reset_rep_accumulators(self) -> None:
@@ -536,7 +656,18 @@ class RepStateMachine:
         Does not reset phase-independent state (standing_peak, smoothing buffer,
         prev_smooth).
         """
-        ...
+        self.rep_start                = None
+        self.bottom_frame             = None
+        self._bottom_candidate_val    = None
+        self._bottom_candidate_frame  = None
+        self._bottom_fdata            = None
+        self._descent_frames          = 0
+        self._ascent_frames           = 0
+        self._ascent_hc_ys            = []
+        self._depth_flags             = []
+        self._min_gap_px              = float("inf")
+        self._tibial_angles           = {}
+        self._hold_count              = 0
 
 
     def _finalise_rep(self, end_frame: int) -> dict:
@@ -554,4 +685,39 @@ class RepStateMachine:
         Returns:
             Completed rep dict matching the schema in the module docstring.
         """
-        ...
+        frame_h = self._frame_height_obs or self.frame_height
+
+        tempo  = _build_tempo(
+            self._descent_frames,
+            self._ascent_frames,
+            self._ascent_hc_ys,
+            frame_h,
+            self.fps,
+        )
+        tibial = _build_tibial(self._tibial_angles)
+
+        flags = compute_flags(tempo, tibial)
+        tempo["flags"] = flags
+
+        depth_angle = (
+            _depth_angle_at_frame(self._bottom_fdata, self.side)
+            if self._bottom_fdata is not None
+            else None
+        )
+
+        result = _build_depth_result(
+            self._depth_flags,
+            self._min_gap_px,
+            frame_h,
+        )
+
+        return {
+            "result":        result,
+            "start_global":  self.rep_start,
+            "bottom_global": self.bottom_frame,
+            "end_global":    end_frame,
+            "depth_flags":   list(self._depth_flags),
+            "tempo":         tempo,
+            "tibial":        tibial,
+            "depth_angle":   round(depth_angle, 1) if depth_angle is not None else None,
+        }
