@@ -21,10 +21,12 @@ import cv2
 from depth_detector import (
     _ensure_model,
     _get_rotation,
+    _infer_one_frame,
+    _make_detector,
     _rotate_frame,
     _select_side,
 )
-from draw import (
+from rendering.draw import (
     GRAPH_FRAMES,
     _draw_backgrounds,
     _draw_coaching_panel,
@@ -43,37 +45,6 @@ from params import (
 )
 from state_machine import RepStateMachine
 
-
-def _infer_one_frame(
-    frame,
-    detector,
-    frame_idx: int,
-    fps: float,
-) -> dict | None:
-    """
-    Run MediaPipe BlazePose inference on a single already-decoded BGR frame.
-
-    This is the single-frame equivalent of depth_detector._extract_landmarks,
-    which processes an entire video in one call.  The caller owns the detector
-    lifecycle (create once before the loop, close after).
-
-    Args:
-        frame:     BGR numpy array (already rotated to display orientation).
-        detector:  An open mediapipe.tasks.python.vision.PoseLandmarker instance
-                   created in VIDEO running mode.  Must be the same instance used
-                   for all frames in this video — VIDEO mode is stateful.
-        frame_idx: 0-based frame index.  Used to compute the timestamp_ms passed
-                   to detect_for_video(); must be strictly monotonically increasing.
-        fps:       Video frame rate.  Used to compute timestamp_ms = frame_idx * 1000 / fps.
-
-    Returns:
-        fdata dict matching the schema from depth_detector._extract_landmarks:
-            {frame_idx, left_hip, right_hip, left_knee, right_knee,
-             left_wrist, right_wrist, left_shoulder, right_shoulder,
-             left_heel, right_heel, width, height}
-        or None if MediaPipe detected no pose in this frame.
-    """
-    raise NotImplementedError
 
 
 def _smooth_one_frame(

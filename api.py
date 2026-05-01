@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from depth_detector import _ensure_model, _get_rotation
 from metrics import compute_flags
 from params import HOLE_EXIT_FRACTION
-from visualize import _analyze, _render
+from visualization.visualize import _analyze, _render
 
 app = FastAPI()  # main application instance
 

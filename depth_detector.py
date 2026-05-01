@@ -161,10 +161,17 @@ def _rotate_frame(frame, angle: int):
     return frame
 
 
-def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
-    """Extract per-frame landmark data using the MediaPipe Tasks API (mediapipe >= 0.10)."""
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+def _make_detector():
+    """
+    Create and return a MediaPipe PoseLandmarker configured for VIDEO mode.
 
+    The caller is responsible for the lifecycle — use as a context manager:
+        with _make_detector() as detector:
+            ...
+
+    VIDEO mode requires strictly monotonically increasing timestamps and a
+    single persistent detector instance across all frames in a video.
+    """
     options = mp_vision.PoseLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(MODEL_PATH)),
         running_mode=mp_vision.RunningMode.VIDEO,
@@ -173,9 +180,62 @@ def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
         min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    return mp_vision.PoseLandmarker.create_from_options(options)
+
+
+def _infer_one_frame(frame, detector, frame_idx: int, fps: float) -> dict | None:
+    """
+    Run MediaPipe BlazePose inference on a single already-decoded BGR frame.
+
+    Single-frame equivalent of _extract_landmarks for use in the single-pass
+    pipeline loop.  The detector must be the same instance across all frames
+    in the video — VIDEO mode is stateful.
+
+    Args:
+        frame:     BGR numpy array, already rotated to display orientation.
+        detector:  Open PoseLandmarker from _make_detector().
+        frame_idx: 0-based frame index; must be strictly monotonically increasing.
+        fps:       Video frame rate; used to compute timestamp_ms.
+
+    Returns:
+        fdata dict matching the _extract_landmarks schema, or None if no pose
+        was detected in this frame.
+    """
+    h, w = frame.shape[:2]
+    mp_image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+    )
+    timestamp_ms = int(frame_idx * 1000 / fps)
+    result = detector.detect_for_video(mp_image, timestamp_ms)
+
+    if not result.pose_landmarks:
+        return None
+
+    lm = result.pose_landmarks[0]
+    return {
+        "frame_idx":      frame_idx,
+        "left_hip":       (lm[LEFT_HIP].x * w,       lm[LEFT_HIP].y * h,       lm[LEFT_HIP].visibility,  lm[LEFT_HIP].z),
+        "right_hip":      (lm[RIGHT_HIP].x * w,      lm[RIGHT_HIP].y * h,      lm[RIGHT_HIP].visibility, lm[RIGHT_HIP].z),
+        "left_knee":      (lm[LEFT_KNEE].x * w,       lm[LEFT_KNEE].y * h,      lm[LEFT_KNEE].visibility),
+        "right_knee":     (lm[RIGHT_KNEE].x * w,      lm[RIGHT_KNEE].y * h,     lm[RIGHT_KNEE].visibility),
+        "left_wrist":     (lm[LEFT_WRIST].x * w,      lm[LEFT_WRIST].y * h),
+        "right_wrist":    (lm[RIGHT_WRIST].x * w,     lm[RIGHT_WRIST].y * h),
+        "left_shoulder":  (lm[LEFT_SHOULDER].x * w,   lm[LEFT_SHOULDER].y * h),
+        "right_shoulder": (lm[RIGHT_SHOULDER].x * w,  lm[RIGHT_SHOULDER].y * h),
+        "left_heel":      (lm[LEFT_HEEL].x * w,       lm[LEFT_HEEL].y * h),
+        "right_heel":     (lm[RIGHT_HEEL].x * w,      lm[RIGHT_HEEL].y * h),
+        "width": w,
+        "height": h,
+    }
+
+
+def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
+    """Extract per-frame landmark data using the MediaPipe Tasks API (mediapipe >= 0.10)."""
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     frames_data = []
-    with mp_vision.PoseLandmarker.create_from_options(options) as detector:
+    with _make_detector() as detector:
         frame_idx = 0
         while True:
             ret, frame = cap.read()
@@ -183,35 +243,7 @@ def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:
                 break
 
             frame = _rotate_frame(frame, rotation)
-            h, w = frame.shape[:2]
-
-            mp_image = mp.Image(
-                image_format=mp.ImageFormat.SRGB,
-                data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-            )
-            timestamp_ms = int(frame_idx * 1000 / fps)
-            result = detector.detect_for_video(mp_image, timestamp_ms)
-
-            if result.pose_landmarks:
-                lm = result.pose_landmarks[0]  # first (and only) detected person
-                frames_data.append({
-                    "frame_idx": frame_idx,
-                    "left_hip":       (lm[LEFT_HIP].x * w,       lm[LEFT_HIP].y * h,       lm[LEFT_HIP].visibility,  lm[LEFT_HIP].z),
-                    "right_hip":      (lm[RIGHT_HIP].x * w,      lm[RIGHT_HIP].y * h,      lm[RIGHT_HIP].visibility, lm[RIGHT_HIP].z),
-                    "left_knee":      (lm[LEFT_KNEE].x * w,       lm[LEFT_KNEE].y * h,      lm[LEFT_KNEE].visibility),
-                    "right_knee":     (lm[RIGHT_KNEE].x * w,      lm[RIGHT_KNEE].y * h,     lm[RIGHT_KNEE].visibility),
-                    "left_wrist":     (lm[LEFT_WRIST].x * w,      lm[LEFT_WRIST].y * h),
-                    "right_wrist":    (lm[RIGHT_WRIST].x * w,     lm[RIGHT_WRIST].y * h),
-                    "left_shoulder":  (lm[LEFT_SHOULDER].x * w,   lm[LEFT_SHOULDER].y * h),
-                    "right_shoulder": (lm[RIGHT_SHOULDER].x * w,  lm[RIGHT_SHOULDER].y * h),
-                    "left_heel":      (lm[LEFT_HEEL].x * w,       lm[LEFT_HEEL].y * h),
-                    "right_heel":     (lm[RIGHT_HEEL].x * w,      lm[RIGHT_HEEL].y * h),
-                    "width": w,
-                    "height": h,
-                })
-            else:
-                frames_data.append(None)
-
+            frames_data.append(_infer_one_frame(frame, detector, frame_idx, fps))
             frame_idx += 1
 
     return frames_data

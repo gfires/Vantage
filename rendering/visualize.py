@@ -47,14 +47,14 @@ from params import (
     HOLE_EXIT_FRACTION,
 )
 from metrics import compute_tempo, compute_tibial_angle, compute_depth_angle, compute_flags
-from draw import (
+from rendering.draw import (
     GRAPH_FRAMES,
     WHITE, GREEN, YELLOW, MAGENTA, RED, DARK, GRAY, CYAN, PURPLE,
     _draw_skeleton, _draw_backgrounds, _draw_lights, _draw_rep_counter,
     _draw_side_badge, _draw_metrics_hud, _draw_coaching_panel, _draw_graph,
     _estimated_marker_ys,
 )
-from pipeline import _process_video
+from rendering.pipeline import _process_video
 
 # ── Output toggles ────────────────────────────────────────────────────────────
 SAVE_VIDEO  = True   # write annotated MP4 alongside input, then auto-open it
@@ -157,7 +157,9 @@ def main():
         idx = args.index("--side")
         force_side = args[idx + 1].lower()
         args = args[:idx] + args[idx + 2:]
-    video_path = args[0] if args else "tests/raw_videos/valid_1.MOV"
+    if not args:
+        raise ValueError("Usage: visualize.py <video> [--side left|right]")
+    video_path = args[0]
 
     path = Path(video_path)
     annotated_dir = path.parent.parent / "annotated_videos"

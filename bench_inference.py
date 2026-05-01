@@ -20,7 +20,7 @@ import cv2
 import params  # mutated directly to avoid re-importing the module tree
 
 from depth_detector import _ensure_model, _get_rotation, _extract_landmarks
-from visualize import _analyze
+from visualization.visualize import _analyze
 
 RESOLUTIONS = [None, 720, 480, 360]   # None = full resolution baseline
 
