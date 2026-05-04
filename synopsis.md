@@ -48,6 +48,31 @@ vantage/
 
 ## Key Design Decisions
 
+### Signs and numerical conventions
+
+In this codebase, y increases downward (screen coordinates). Everything else follows from that:
+
+Signal	Small value	Large value
+hip_y	hips high (standing)	hips low (squat bottom)
+hc_y	hip crease high	hip crease low
+kt_y	knee top high	knee top low
+Depth flag: hc_y > kt_y → hip crease is below knee top in screen coords → depth achieved.
+
+Depth angle: rise = hc_y - kt_y → positive when hc is lower than kt → positive angle = depth achieved, negative = short.
+
+Tibial angle: atan2(|knee_x - heel_x|, |heel_y - knee_y|) — always ≥ 0°, increases as knee travels forward. Note heel_y - knee_y (not knee_y - heel_y) because the heel is below the knee in screen coords, making dy positive.
+
+Velocity: -Δhc_y * fps / frame_height — negated because rising hips = decreasing hip_y, so negation makes upward motion positive.
+
+State machine transitions:
+
+STANDING→DESCENDING: smooth_val increases (hips going lower)
+DESCENDING→ASCENDING: smooth_val decreases (hips coming back up)
+standing_peak = minimum smooth hip_y while standing (the highest the hips sit at rest)
+bottom_candidate = maximum smooth hip_y during descent (the lowest the hips reach)
+Recovered fraction = (bottom_val - smooth_val) / (bottom_val - standing_peak) → approaches 1 as hips return to standing height
+
+
 ### Landmark extraction (`depth_detector.py`)
 
 Extracts 7 joints per frame from MediaPipe's 33-landmark BlazePose model (wrist tracking removed as inaccurate):

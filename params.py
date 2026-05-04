@@ -23,9 +23,19 @@ SMOOTHING_WINDOW     = 5     # rolling average for hip-Y bottom detection
 CLOSE_THRESHOLD      = 0.02  # within 2% of frame height → BORDERLINE
 
 # ── Rep segmentation ──────────────────────────────────────────────────────────
-REP_SMOOTHING         = 15   # smoothing window for hip-crease height signal
-MIN_REP_FRAMES        = 15   # min frames between standing peaks / min segment length
-MIN_DESCENT_THRESHOLD = 0.10 # min hip drop (fraction of frame height) to count as a rep
+REP_SMOOTHING  = 15   # smoothing window for hip-crease height signal
+MIN_REP_FRAMES = 15   # min frames between standing peaks / min segment length
+
+# ── State machine ─────────────────────────────────────────────────────────────
+MIN_HOLD_FRAMES       = 4     # consecutive frames a direction must hold before a
+                               # transition is confirmed (suppresses jitter)
+MIN_DESCENT_THRESHOLD = 0.02  # min hip drop (fraction of frame height) to confirm descent
+ASCENT_RECOVERY_FRAC  = 0.95  # fraction of descent recovered before ASCENDING→STANDING fires
+
+# Pipeline delay = how many frames behind the render loop operates relative to
+# inference.  Derived — do not set directly.  Changing SMOOTHING_WINDOW or
+# MIN_HOLD_FRAMES automatically adjusts the delay.
+PIPELINE_DELAY = SMOOTHING_WINDOW + MIN_HOLD_FRAMES  # currently 5 + 4 = 9 frames
 
 # ── Drawing smoothing (display only — never affects classification) ────────────
 DRAW_SMOOTHING = 3           # rolling average for skeleton/marker rendering coords

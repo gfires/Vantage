@@ -21,8 +21,9 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from depth_detector import _ensure_model, _get_rotation
-from params import HOLE_EXIT_FRACTION, TIBIAL_NOTE_DEG, TIBIAL_WARN_DEG
-from visualize import _analyze, _render
+from metrics import compute_flags
+from params import HOLE_EXIT_FRACTION
+from rendering.pipeline import _process_video
 
 app = FastAPI()  # main application instance
 
@@ -48,17 +49,6 @@ def _new_job() -> tuple[str, dict]:
 
 # ── Rep serialisation (mirrors _output_rep_table rows) ───────────────────────
 
-def _rep_warnings(rep: dict) -> list[str]:
-    warns = list(rep["tempo"].get("flags", []))
-    max_tib = rep["tibial"].get("max_angle")
-    if max_tib is not None:
-        if max_tib > TIBIAL_WARN_DEG:
-            warns.append("KNEES TOO FORWARD")
-        elif max_tib > TIBIAL_NOTE_DEG:
-            warns.append("KNEES SLIGHTLY FORWARD")
-    return warns
-
-
 def _hole_s(rep: dict, fps: float) -> float:
     bottom = rep["bottom_global"]
     end = rep["end_global"]
@@ -80,7 +70,7 @@ def _serialise_reps(reps: list, fps: float) -> list[dict]:
             "ascent_s": round(t.get("ascent_s", 0), 2),
             "depth_angle": round(rep["depth_angle"], 1) if rep.get("depth_angle") is not None else None,
             "max_shin": round(tib["max_angle"], 0) if tib.get("max_angle") is not None else None,
-            "warnings": _rep_warnings(rep),
+            "warnings": compute_flags(rep["tempo"], rep["tibial"]),
         })
     return out
 
@@ -98,22 +88,6 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
         rotation = _get_rotation(cap)
         job["fps"] = fps
 
-        analysis = _analyze(cap, rotation, fps, force_side=None)
-        cap.release()
-
-        if analysis is None:
-            job["state"] = "error"
-            job["error"] = "Could not detect a squat. Check camera angle."
-            try:
-                job["queue"].put_nowait(None)
-            except queue.Full:
-                pass
-            return
-
-        frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
-        job["reps"] = _serialise_reps(reps, fps)
-        job["state"] = "rendering"
-
         frame_interval = 1.0 / fps
         _last_frame_time: list[float] = [time.monotonic()]
 
@@ -130,17 +104,15 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
             except queue.Full:
                 raise RuntimeError("stream consumer disconnected")
 
-        cap2 = cv2.VideoCapture(input_path)
-        cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
-        _render(
-            cap2, rotation, fps,
-            frames_data, draw_frames, side, reps,
-            smooth_hip_ys, knee_ys, valid_frame_indices,
-            output_path,
-            frame_callback=_cb,
-        )
-        cap2.release()
+        reps = _process_video(cap, rotation, fps, output_path=output_path, on_frame=_cb)
+        cap.release()
 
+        if not reps:
+            job["state"] = "error"
+            job["error"] = "Could not detect a squat. Check camera angle."
+            return
+
+        job["reps"] = _serialise_reps(reps, fps)
         job["output_path"] = output_path
         job["state"] = "done"
 
