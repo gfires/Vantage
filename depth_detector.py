@@ -35,16 +35,34 @@ MODEL_URL = (
 )
 
 # MediaPipe BlazePose landmark indices (same across all API versions)
-LEFT_HIP = 23
-RIGHT_HIP = 24
-LEFT_KNEE = 25
-RIGHT_KNEE = 26
-LEFT_WRIST = 15
-RIGHT_WRIST = 16
+LEFT_HIP      = 23
+RIGHT_HIP     = 24
+LEFT_KNEE     = 25
+RIGHT_KNEE    = 26
+LEFT_WRIST    = 15
+RIGHT_WRIST   = 16
 LEFT_SHOULDER = 11
 RIGHT_SHOULDER = 12
-LEFT_HEEL = 29
-RIGHT_HEEL = 30
+LEFT_HEEL     = 29
+RIGHT_HEEL    = 30
+
+# Joint registry — drives both _infer_one_frame and pipeline draw-smoothing.
+# Each entry: {"idx": int, "vis": bool, "z": bool}
+#   idx: MediaPipe landmark index
+#   vis: whether the landmark includes a visibility score (3rd tuple element)
+#   z:   whether the landmark includes a z-depth value (4th tuple element)
+JOINTS = {
+    "left_hip":       {"idx": LEFT_HIP,       "vis": True,  "z": True},
+    "right_hip":      {"idx": RIGHT_HIP,      "vis": True,  "z": True},
+    "left_knee":      {"idx": LEFT_KNEE,       "vis": True,  "z": False},
+    "right_knee":     {"idx": RIGHT_KNEE,      "vis": True,  "z": False},
+    "left_shoulder":  {"idx": LEFT_SHOULDER,   "vis": False, "z": False},
+    "right_shoulder": {"idx": RIGHT_SHOULDER,  "vis": False, "z": False},
+    "left_wrist":     {"idx": LEFT_WRIST,      "vis": False, "z": False},
+    "right_wrist":    {"idx": RIGHT_WRIST,     "vis": False, "z": False},
+    "left_heel":      {"idx": LEFT_HEEL,       "vis": False, "z": False},
+    "right_heel":     {"idx": RIGHT_HEEL,      "vis": False, "z": False},
+}
 
 
 def _ensure_model():
@@ -213,21 +231,16 @@ def _infer_one_frame(frame, detector, frame_idx: int, fps: float) -> dict | None
         return None
 
     lm = result.pose_landmarks[0]
-    return {
-        "frame_idx":      frame_idx,
-        "left_hip":       (lm[LEFT_HIP].x * w,       lm[LEFT_HIP].y * h,       lm[LEFT_HIP].visibility,  lm[LEFT_HIP].z),
-        "right_hip":      (lm[RIGHT_HIP].x * w,      lm[RIGHT_HIP].y * h,      lm[RIGHT_HIP].visibility, lm[RIGHT_HIP].z),
-        "left_knee":      (lm[LEFT_KNEE].x * w,       lm[LEFT_KNEE].y * h,      lm[LEFT_KNEE].visibility),
-        "right_knee":     (lm[RIGHT_KNEE].x * w,      lm[RIGHT_KNEE].y * h,     lm[RIGHT_KNEE].visibility),
-        "left_wrist":     (lm[LEFT_WRIST].x * w,      lm[LEFT_WRIST].y * h),
-        "right_wrist":    (lm[RIGHT_WRIST].x * w,     lm[RIGHT_WRIST].y * h),
-        "left_shoulder":  (lm[LEFT_SHOULDER].x * w,   lm[LEFT_SHOULDER].y * h),
-        "right_shoulder": (lm[RIGHT_SHOULDER].x * w,  lm[RIGHT_SHOULDER].y * h),
-        "left_heel":      (lm[LEFT_HEEL].x * w,       lm[LEFT_HEEL].y * h),
-        "right_heel":     (lm[RIGHT_HEEL].x * w,      lm[RIGHT_HEEL].y * h),
-        "width": w,
-        "height": h,
-    }
+    fdata = {"frame_idx": frame_idx, "width": w, "height": h}
+    for name, meta in JOINTS.items():
+        p = lm[meta["idx"]]
+        entry = (p.x * w, p.y * h)
+        if meta["vis"]:
+            entry += (p.visibility,)
+        if meta["z"]:
+            entry += (p.z,)
+        fdata[name] = entry
+    return fdata
 
 
 def _extract_landmarks(cap: cv2.VideoCapture, rotation: int) -> list:

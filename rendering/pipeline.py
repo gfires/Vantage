@@ -19,6 +19,7 @@ from pathlib import Path
 import cv2
 
 from depth_detector import (
+    JOINTS,
     _ensure_model,
     _get_rotation,
     _infer_one_frame,
@@ -77,24 +78,48 @@ def _smooth_one_frame(
         fdata is None.  Visibility and z fields are copied from the original
         without smoothing.
     """
-    raise NotImplementedError
+    NAN = float("nan")
+
+    if fdata is None:
+        for bufs in smooth_bufs.values():
+            bufs["x"].append(NAN)
+            bufs["y"].append(NAN)
+        return None
+
+    df = dict(fdata)  # shallow copy — width/height/frame_idx unchanged
+    for joint, bufs in smooth_bufs.items():
+        raw = fdata[joint]
+        bufs["x"].append(raw[0])
+        bufs["y"].append(raw[1])
+
+        valid_x = [v for v in bufs["x"] if v == v]
+        valid_y = [v for v in bufs["y"] if v == v]
+        sx = sum(valid_x) / len(valid_x) if valid_x else raw[0]
+        sy = sum(valid_y) / len(valid_y) if valid_y else raw[1]
+
+        # Preserve any extra fields (visibility, z) verbatim from original
+        df[joint] = (sx, sy) + raw[2:]
+
+    return df
+
 
 
 def _make_smooth_bufs() -> dict:
     """
     Allocate the per-joint rolling buffers used by _smooth_one_frame.
 
+    Driven by the JOINTS registry in depth_detector so the joint list stays
+    in one place.  Extra tuple fields (visibility, z) are handled generically
+    via raw[2:] in _smooth_one_frame — no per-joint metadata needed here.
+
     Returns:
-        Dict mapping each joint name to a fresh deque(maxlen=DRAW_SMOOTHING).
-        Must be called once before the render loop and passed to every
-        _smooth_one_frame call.
+        Dict mapping joint name to {"x": deque(maxlen=DRAW_SMOOTHING), "y": deque(...)}.
+        Must be called once before the render loop.
     """
-    joints = [
-        "left_hip", "right_hip", "left_knee", "right_knee",
-        "left_shoulder", "right_shoulder", "left_heel", "right_heel",
-    ]
-    return {j: {"x": deque(maxlen=DRAW_SMOOTHING), "y": deque(maxlen=DRAW_SMOOTHING)}
-            for j in joints}
+    return {
+        name: {"x": deque(maxlen=DRAW_SMOOTHING), "y": deque(maxlen=DRAW_SMOOTHING)}
+        for name in JOINTS
+    }
 
 
 def _process_video(
@@ -173,4 +198,4 @@ def _process_video(
         frames still in the ring buffers.  No new inference; fdata values are
         already buffered.  Each buffered frame is drawn and emitted normally.
     """
-    raise NotImplementedError
+    
