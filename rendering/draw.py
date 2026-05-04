@@ -249,6 +249,26 @@ def _draw_rep_counter(frame, rep_num, total_reps, frame_w, frame_h):
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, WHITE, 2, cv2.LINE_AA)
 
 
+def _draw_phase_box(frame, phase_label: str, frame_h):
+    """Small debug box bottom-left above the graph showing the current SM phase."""
+    PAD_L, PAD_B = 12, 12
+    GH = 100
+    y_top = frame_h - PAD_B - GH - 28
+    label = f"SM: {phase_label}"
+    font  = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thickness = 0.45, 1
+    (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
+    x0, y0 = PAD_L, y_top
+    x1, y1 = PAD_L + tw + 10, y_top + th + baseline + 6
+    cv2.rectangle(frame, (x0, y0), (x1, y1), DARK, -1)
+    color = {
+        "STANDING":   WHITE,
+        "DESCENDING": YELLOW,
+        "ASCENDING":  GREEN,
+    }.get(phase_label, GRAY)
+    cv2.putText(frame, label, (x0 + 5, y1 - baseline - 2), font, scale, color, thickness, cv2.LINE_AA)
+
+
 def _draw_side_badge(frame, side, frame_w, frame_h):
     """Black box with white text in the bottom-right showing which side is being tracked."""
     x0, y0, x1, y1, tx, ty, label = _side_badge_coords(frame_w, frame_h, side)

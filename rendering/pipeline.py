@@ -35,6 +35,7 @@ from rendering.draw import (
     _draw_graph,
     _draw_lights,
     _draw_metrics_hud,
+    _draw_phase_box,
     _draw_rep_counter,
     _draw_side_badge,
     _draw_skeleton,
@@ -253,6 +254,7 @@ def _process_video(
 
             _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle, is_bottom)
             _draw_graph(frame, hip_y_deque, knee_y_deque, None, h)
+            _draw_phase_box(frame, sm.phase.name, h)
             _draw_metrics_hud(frame, last_rep, frame_idx, w)
             _draw_coaching_panel(frame, last_rep, frame_idx, w)
             _draw_lights(frame, last_rep, frame_idx, h)
@@ -260,6 +262,7 @@ def _process_video(
             _draw_side_badge(frame, side, w, h)
         else:
             _draw_graph(frame, hip_y_deque, knee_y_deque, None, h)
+            _draw_phase_box(frame, sm.phase.name, h)
             _draw_metrics_hud(frame, last_rep, frame_idx, w)
             _draw_coaching_panel(frame, last_rep, frame_idx, w)
             _draw_lights(frame, last_rep, frame_idx, h)

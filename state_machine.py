@@ -47,6 +47,7 @@ from params import (
     PIPELINE_DELAY,
     MIN_DEPTH_FRAMES,
     MIN_DESCENT_THRESHOLD,
+    ASCENT_RECOVERY_FRAC,
     CLOSE_THRESHOLD,
     HOLE_EXIT_FRACTION,
     HIP_CREASE_FRAC,
@@ -152,13 +153,11 @@ def _depth_angle_at_frame(fdata: dict, side: str) -> float:
         Angle in degrees, signed.
     """
     hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side)
-    dx   = kt_x - hc_x
-    dy   = kt_y - hc_y
-    dist = math.hypot(dx, dy)
-    if dist < 1e-6:
-        return 0.0
-    rise = hc_y - kt_y   # positive in screen coords = hc lower = depth achieved
-    return math.degrees(math.asin(max(-1.0, min(1.0, rise / dist))))
+    # Angle of the hc→kt segment against the horizontal.
+    # positive = hc below kt = depth achieved, negative = hc above kt = short.
+    rise = hc_y - kt_y
+    run  = abs(kt_x - hc_x)
+    return math.degrees(math.atan2(rise, max(run, 1e-6)))
 
 
 # ── Metric builders ───────────────────────────────────────────────────────────
@@ -452,10 +451,12 @@ class RepStateMachine:
             # Check that the drop is significant: hip_y must exceed standing baseline
             # by at least MIN_DESCENT_THRESHOLD * frame_height.
             if (smooth_val - self._standing_peak) >= MIN_DESCENT_THRESHOLD * self.frame_height:
-                # Retroactive: descent started MIN_HOLD_FRAMES ago
-                self.rep_start  = frame_idx - MIN_HOLD_FRAMES + 1
-                self.phase      = Phase.DESCENDING
-                self._hold_count = 0
+                # Retroactive: descent started MIN_HOLD_FRAMES ago.
+                # Seed _descent_frames to account for hold frames already elapsed.
+                self.rep_start       = frame_idx - MIN_HOLD_FRAMES + 1
+                self.phase           = Phase.DESCENDING
+                self._hold_count     = 0
+                self._descent_frames = MIN_HOLD_FRAMES - 1
                 # Seed the bottom candidate at the current frame
                 self._bottom_candidate_val   = smooth_val
                 self._bottom_candidate_frame = frame_idx
@@ -511,6 +512,9 @@ class RepStateMachine:
             self.bottom_frame = self._bottom_candidate_frame
             self.phase        = Phase.ASCENDING
             self._hold_count  = 0
+            # The MIN_HOLD_FRAMES confirmation frames were already ascending —
+            # seed ascent_frames so they're included in the timing.
+            self._ascent_frames = MIN_HOLD_FRAMES
             # Seed ascent accumulator with hip-crease Y at the bottom frame
             if self._bottom_fdata is not None:
                 shoulder = self._bottom_fdata[f"{self.side}_shoulder"]
@@ -565,7 +569,7 @@ class RepStateMachine:
         else:
             recovered = 0.0
 
-        if recovered > 0.9:
+        if recovered > ASCENT_RECOVERY_FRAC:
             completed = self._finalise_rep(frame_idx)
             self._reset_rep_accumulators()
             self._standing_peak = smooth_val
