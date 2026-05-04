@@ -19,10 +19,8 @@ from params import (
     CLOSE_THRESHOLD,
     DRAW_SMOOTHING,
     HIP_CREASE_FRAC,
-    HOLE_EXIT_FRACTION,
     HOLE_MCV_NOTE,
     KNEE_TOP_OVERSHOOT,
-    TIBIAL_NOTE_DEG,
     TIBIAL_WARN_DEG,
 )
 
@@ -220,17 +218,14 @@ def _draw_backgrounds(overlay, frame_w, frame_h, rep_num, total_reps, cur_rep):
         cv2.rectangle(overlay, (cx0, cy0), (cx0 + cw, cy0 + ch), DARK, -1)
 
 
-def _draw_lights(frame, cur_rep, frame_idx, frame_h):
-    """Judgment circles — drawn after blend so they appear at full brightness."""
+def _draw_lights(frame, cur_rep, frame_idx, frame_h, fps=30.0):
+    """Judgment circles — shown for 1 second from rep completion."""
     if cur_rep is None:
         return
-    bottom_global = cur_rep["bottom_global"]
-    start_global  = cur_rep["start_global"]
-    end_global    = cur_rep["end_global"]
-    rep_duration  = max(end_global - start_global, 1)
-    if frame_idx < bottom_global:
+    end_global = cur_rep["end_global"]
+    if frame_idx < end_global:
         return
-    if frame_idx < start_global + rep_duration * 0.75:
+    if frame_idx > end_global + fps:
         return
 
     box_x0, box_x1, box_y0, box_y1, r, h_pad, gap = _lights_box_coords(frame_h)
@@ -254,7 +249,7 @@ def _draw_phase_box(frame, phase_label: str, frame_h):
     PAD_L, PAD_B = 12, 12
     GH = 100
     y_top = frame_h - PAD_B - GH - 28
-    label = f"SM: {phase_label}"
+    label = f"{phase_label}"
     font  = cv2.FONT_HERSHEY_SIMPLEX
     scale, thickness = 0.45, 1
     (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)
@@ -296,32 +291,20 @@ def _draw_metrics_hud(frame, cur_rep, frame_idx, frame_w):
     hole_v = tempo.get("hole_exit_vel")
     mean_v = tempo.get("mean_concentric_vel")
 
-    bottom    = cur_rep.get("bottom_global", 0)
-    end       = cur_rep.get("end_global", bottom)
-    asc_total = max(end - bottom, 1)
-    hole_end  = bottom + max(1, int(asc_total * HOLE_EXIT_FRACTION))
+    bottom = cur_rep.get("bottom_global", 0)
 
     in_descent = frame_idx < bottom
-    in_hole    = bottom <= frame_idx < hole_end
-
-    if in_descent:
-        stage_label, stage_color = "[ DESCENT ]", WHITE
-    elif in_hole:
-        stage_label, stage_color = "[ HOLE    ]", CYAN
-    else:
-        stage_label, stage_color = "[ ASCENT  ]", GREEN
-    cv2.putText(frame, stage_label, (x0 + 6, y0 + lh), font, small, stage_color, 1, cv2.LINE_AA)
 
     desc_str = f"DESC {desc_s:.1f}s" if desc_s is not None else "DESC --"
     asc_str  = f"ASC  {asc_s:.1f}s"  if asc_s  is not None else "ASC  --"
-    cv2.putText(frame, desc_str, (x0 + 6, y0 + lh * 2), font, small, WHITE, 1, cv2.LINE_AA)
-    cv2.putText(frame, asc_str,  (x0 + 6, y0 + lh * 3), font, small, WHITE, 1, cv2.LINE_AA)
+    cv2.putText(frame, desc_str, (x0 + 6, y0 + lh), font, small, WHITE, 1, cv2.LINE_AA)
+    cv2.putText(frame, asc_str,  (x0 + 6, y0 + lh * 2), font, small, WHITE, 1, cv2.LINE_AA)
 
     if not in_descent:
         if hole_v is not None:
-            cv2.putText(frame, f"HOLE  {hole_v:.3f} fh/s", (x0 + 6, y0 + lh * 4), font, small, CYAN, 1, cv2.LINE_AA)
+            cv2.putText(frame, f"HOLE  {hole_v:.3f} fh/s", (x0 + 6, y0 + lh * 3), font, small, CYAN, 1, cv2.LINE_AA)
         if mean_v is not None:
-            cv2.putText(frame, f"MCV   {mean_v:.3f} fh/s", (x0 + 6, y0 + lh * 5), font, small, CYAN, 1, cv2.LINE_AA)
+            cv2.putText(frame, f"MCV   {mean_v:.3f} fh/s", (x0 + 6, y0 + lh * 4), font, small, CYAN, 1, cv2.LINE_AA)
 
 
 def _draw_coaching_panel(frame, cur_rep, frame_idx, frame_w):
@@ -337,17 +320,9 @@ def _draw_coaching_panel(frame, cur_rep, frame_idx, frame_w):
         return
 
     tempo  = cur_rep.get("tempo", {})
-    tibial = cur_rep.get("tibial", {})
     flags  = tempo.get("flags", [])
-    max_tib = tibial.get("max_angle")
 
     rows = [(f, YELLOW) for f in flags]
-
-    if max_tib is not None:
-        if max_tib > TIBIAL_WARN_DEG:
-            rows.append(("KNEE TOO FORWARD", YELLOW))
-        elif max_tib > TIBIAL_NOTE_DEG:
-            rows.append(("WATCH KNEES", WHITE))
 
     hole_mcv = tempo.get("hole_mcv_ratio")
     if hole_mcv is not None and hole_mcv < HOLE_MCV_NOTE:

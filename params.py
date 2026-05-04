@@ -41,7 +41,7 @@ PIPELINE_DELAY = SMOOTHING_WINDOW + MIN_HOLD_FRAMES  # currently 5 + 4 = 9 frame
 DRAW_SMOOTHING = 3           # rolling average for skeleton/marker rendering coords
 
 # ── Speed & tempo thresholds ──────────────────────────────────────────────────
-DESCENT_FAST_S   = 1.29   # descent faster than this → flag "FAST DESC"
+DESCENT_FAST_S   = 1.0   # descent faster than this → flag "FAST DESC"
 DESCENT_SLOW_S   = 4.0   # descent slower than this → flag "SLOW DESC"
 # Ascent/descent ratio above which the rep is flagged as a grind
 GRIND_RATIO      = 2   # ascent_time > descent_time * GRIND_RATIO → "GRIND"
