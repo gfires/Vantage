@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from depth_detector import _ensure_model, _get_rotation
 from metrics import compute_flags
 from params import HOLE_EXIT_FRACTION
-from visualization.visualize import _analyze, _render
+from rendering.pipeline import _process_video
 
 app = FastAPI()  # main application instance
 
@@ -88,22 +88,6 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
         rotation = _get_rotation(cap)
         job["fps"] = fps
 
-        analysis = _analyze(cap, rotation, fps, force_side=None)
-        cap.release()
-
-        if analysis is None:
-            job["state"] = "error"
-            job["error"] = "Could not detect a squat. Check camera angle."
-            try:
-                job["queue"].put_nowait(None)
-            except queue.Full:
-                pass
-            return
-
-        frames_data, draw_frames, side, reps, smooth_hip_ys, knee_ys, valid_frame_indices = analysis
-        job["reps"] = _serialise_reps(reps, fps)
-        job["state"] = "rendering"
-
         frame_interval = 1.0 / fps
         _last_frame_time: list[float] = [time.monotonic()]
 
@@ -120,17 +104,15 @@ def _process(job_id: str, input_path: str, output_path: str) -> None:
             except queue.Full:
                 raise RuntimeError("stream consumer disconnected")
 
-        cap2 = cv2.VideoCapture(input_path)
-        cap2.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
-        _render(
-            cap2, rotation, fps,
-            frames_data, draw_frames, side, reps,
-            smooth_hip_ys, knee_ys, valid_frame_indices,
-            output_path,
-            frame_callback=_cb,
-        )
-        cap2.release()
+        reps = _process_video(cap, rotation, fps, output_path=output_path, on_frame=_cb)
+        cap.release()
 
+        if not reps:
+            job["state"] = "error"
+            job["error"] = "Could not detect a squat. Check camera angle."
+            return
+
+        job["reps"] = _serialise_reps(reps, fps)
         job["output_path"] = output_path
         job["state"] = "done"
 
@@ -159,8 +141,7 @@ async def upload(file: UploadFile):
     output_path = str(Path(tmp_dir) / "annotated.mp4")
 
     with open(input_path, "wb") as f:
-        async for chunk in file:
-            f.write(chunk)
+        f.write(await file.read())
 
     # Probe duration from file header — instantaneous, no decoding
     _cap = cv2.VideoCapture(input_path)

@@ -82,7 +82,7 @@ def _lights_box_coords(frame_h):
 
 def _rep_counter_coords(frame_w, frame_h, rep_num, total_reps):
     """Return (x, y, tw, th, baseline, label) for the rep counter text."""
-    label = f"REP {rep_num}/{total_reps}" if total_reps > 1 else f"REP {rep_num}"
+    label = f"REP {rep_num}/{total_reps}" if (total_reps is not None and total_reps > 1) else f"REP {rep_num}"
     font  = cv2.FONT_HERSHEY_SIMPLEX
     scale, thickness = 0.7, 2
     (tw, th), baseline = cv2.getTextSize(label, font, scale, thickness)

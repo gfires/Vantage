@@ -13,6 +13,7 @@ Used by:
     api.py        — streaming path (_process calls _process_video with on_frame)
 """
 
+import math
 from collections import deque
 from pathlib import Path
 
@@ -198,4 +199,161 @@ def _process_video(
         frames still in the ring buffers.  No new inference; fdata values are
         already buffered.  Each buffered frame is drawn and emitted normally.
     """
-    
+    _ensure_model()
+
+    # ── Ring buffers ──────────────────────────────────────────────────────────
+    frame_buf: deque[tuple[int, object]] = deque()   # (frame_idx, BGR ndarray)
+    fdata_buf: deque                     = deque()   # fdata | None
+
+    # ── State ─────────────────────────────────────────────────────────────────
+    bufs            = _make_smooth_bufs()
+    completed_reps: list[dict] = []
+    last_rep: dict | None      = None   # most recently completed rep (for HUD)
+    out: cv2.VideoWriter | None = None
+    w = h = 0
+
+    # ── Scrolling graph deques (single-pass path in _draw_graph) ─────────────
+    hip_y_deque  = deque(maxlen=GRAPH_FRAMES)
+    knee_y_deque = deque(maxlen=GRAPH_FRAMES)
+
+    # ── Inner helpers ─────────────────────────────────────────────────────────
+    def _emit(frame_idx: int, frame, fdata, side: str, sm: RepStateMachine) -> None:
+        """Draw overlays onto frame and write/stream it."""
+        nonlocal out, w, h
+
+        fdata_draw = _smooth_one_frame(fdata, bufs)
+
+        if fdata is not None:
+            hip_y_deque.append(fdata[f"{side}_hip"][1])
+            knee_y_deque.append(fdata[f"{side}_knee"][1])
+
+        rep_num = len(completed_reps) + 1 if last_rep is not None else 1
+
+        overlay = frame.copy()
+        _draw_backgrounds(overlay, w, h, rep_num, None, last_rep)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+
+        if fdata_draw is not None:
+            frame_h     = fdata["height"]
+            (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
+            depth_active = hc_y > kt_y
+            near_depth   = abs(hc_y - kt_y) < (frame_h * CLOSE_THRESHOLD)
+
+            tib_angle = None
+            if last_rep is not None:
+                tib_angle = last_rep["tibial"]["angles"].get(frame_idx)
+            if tib_angle is None and fdata is not None:
+                heel = fdata[f"{side}_heel"]
+                knee = fdata[f"{side}_knee"]
+                dx   = abs(knee[0] - heel[0])
+                dy   = abs(heel[1] - knee[1])
+                tib_angle = math.degrees(math.atan2(dx, max(dy, 1e-6)))
+
+            is_bottom = (sm.bottom_frame is not None and frame_idx == sm.bottom_frame)
+
+            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle, is_bottom)
+            _draw_graph(frame, hip_y_deque, knee_y_deque, None, h)
+            _draw_metrics_hud(frame, last_rep, frame_idx, w)
+            _draw_coaching_panel(frame, last_rep, frame_idx, w)
+            _draw_lights(frame, last_rep, frame_idx, h)
+            _draw_rep_counter(frame, rep_num, None, w, h)
+            _draw_side_badge(frame, side, w, h)
+        else:
+            _draw_graph(frame, hip_y_deque, knee_y_deque, None, h)
+            _draw_metrics_hud(frame, last_rep, frame_idx, w)
+            _draw_coaching_panel(frame, last_rep, frame_idx, w)
+            _draw_lights(frame, last_rep, frame_idx, h)
+            _draw_rep_counter(frame, rep_num, None, w, h)
+            _draw_side_badge(frame, side, w, h)
+
+        if output_path is not None:
+            if out is None:
+                fourcc = cv2.VideoWriter_fourcc(*"avc1")
+                out = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
+            out.write(frame)
+
+        if on_frame is not None:
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            on_frame(jpeg.tobytes())
+
+    # ── Probe phase: fill ring buffer, select side ────────────────────────────
+    side: str | None = force_side
+    sm: RepStateMachine | None = None
+
+    with _make_detector() as detector:
+        frame_idx = 0
+
+        # Read probe frames to fill PIPELINE_DELAY-deep buffer and select side
+        probe_valid: list[tuple[int, dict]] = []
+        while frame_idx < PIPELINE_DELAY:
+            ret, raw = cap.read()
+            if not ret:
+                break
+            raw = _rotate_frame(raw, rotation)
+            if frame_idx == 0:
+                h, w = raw.shape[:2]
+            fdata = _infer_one_frame(raw, detector, frame_idx, fps)
+            frame_buf.append((frame_idx, raw))
+            fdata_buf.append(fdata)
+            if fdata is not None:
+                probe_valid.append((frame_idx, fdata))
+            frame_idx += 1
+
+        if side is None:
+            if not probe_valid:
+                raise ValueError(
+                    "No pose detected during probe phase — cannot select side. "
+                    "Pass force_side or ensure the subject is visible from the start."
+                )
+            side = _select_side(probe_valid)
+
+        if h == 0:
+            # No frames decoded at all
+            return []
+
+        sm = RepStateMachine(frame_height=h, fps=fps, side=side)
+
+        # ── Main decode loop ──────────────────────────────────────────────────
+        while True:
+            ret, raw = cap.read()
+            if not ret:
+                break
+            raw   = _rotate_frame(raw, rotation)
+            fdata = _infer_one_frame(raw, detector, frame_idx, fps)
+
+            frame_buf.append((frame_idx, raw))
+            fdata_buf.append(fdata)
+            frame_idx += 1
+
+            # Pop the oldest buffered frame (PIPELINE_DELAY frames behind)
+            if len(frame_buf) > PIPELINE_DELAY:
+                tail_idx, tail_frame = frame_buf.popleft()
+                tail_fdata           = fdata_buf.popleft()
+
+                completed = sm.feed(tail_idx, tail_fdata)
+                if completed is not None:
+                    completed_reps.append(completed)
+                    last_rep = completed
+
+                _emit(tail_idx, tail_frame, tail_fdata, side, sm)
+
+    # ── Flush phase: drain remaining buffered frames ──────────────────────────
+    while frame_buf:
+        tail_idx, tail_frame = frame_buf.popleft()
+        tail_fdata           = fdata_buf.popleft()
+
+        completed = sm.feed(tail_idx, tail_fdata)
+        if completed is not None:
+            completed_reps.append(completed)
+            last_rep = completed
+
+        _emit(tail_idx, tail_frame, tail_fdata, side, sm)
+
+    # ── Teardown ──────────────────────────────────────────────────────────────
+    if out is not None:
+        out.release()
+    if on_frame is not None:
+        on_frame(None)
+
+    return completed_reps
+
