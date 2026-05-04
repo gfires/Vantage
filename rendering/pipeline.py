@@ -179,10 +179,6 @@ def _process_video(
         List of completed rep dicts in emission order, matching the schema in
         state_machine.py.  Empty list if no reps were detected.
 
-    Raises:
-        ValueError: if no pose is detected during the probe phase and force_side
-                    is None (cannot proceed without a side selection).
-
     Pipeline per frame:
         1. Decode + rotate                        → raw BGR frame
         2. _infer_one_frame(frame, detector, ...)  → fdata | None
@@ -257,7 +253,7 @@ def _process_video(
             _draw_phase_box(frame, sm.phase.name, h)
             _draw_metrics_hud(frame, last_rep, frame_idx, w)
             _draw_coaching_panel(frame, last_rep, frame_idx, w)
-            _draw_lights(frame, last_rep, frame_idx, h)
+            _draw_lights(frame, last_rep, frame_idx, h, fps)
             _draw_rep_counter(frame, rep_num, None, w, h)
             _draw_side_badge(frame, side, w, h)
         else:
@@ -265,7 +261,7 @@ def _process_video(
             _draw_phase_box(frame, sm.phase.name, h)
             _draw_metrics_hud(frame, last_rep, frame_idx, w)
             _draw_coaching_panel(frame, last_rep, frame_idx, w)
-            _draw_lights(frame, last_rep, frame_idx, h)
+            _draw_lights(frame, last_rep, frame_idx, h, fps)
             _draw_rep_counter(frame, rep_num, None, w, h)
             _draw_side_badge(frame, side, w, h)
 
@@ -303,12 +299,11 @@ def _process_video(
             frame_idx += 1
 
         if side is None:
-            if not probe_valid:
-                raise ValueError(
-                    "No pose detected during probe phase — cannot select side. "
-                    "Pass force_side or ensure the subject is visible from the start."
-                )
-            side = _select_side(probe_valid)
+            if probe_valid:
+                side = _select_side(probe_valid)
+            if side is None:
+                side = "right"
+                # TODO: fix this edge case by falling back to a non-side-specific heuristic (e.g. which hip is more visible on average across the probe frames) instead of just defaulting to right and hoping for the best.
 
         if h == 0:
             # No frames decoded at all

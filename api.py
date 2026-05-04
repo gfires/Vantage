@@ -224,5 +224,5 @@ def download(job_id: str):
     return FileResponse(
         job["output_path"],
         media_type="video/mp4",
-        filename="whitelights_annotated.mp4",
+        filename="vantage_annotated.mp4",
     )
