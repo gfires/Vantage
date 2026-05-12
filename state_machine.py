@@ -136,11 +136,12 @@ def _tibial_angle(fdata: dict, side: str, camera_roll: float = 0.0) -> float:
     dx = knee[0] - heel[0]
     dy = knee[1] - heel[1]
     # Project heel→knee onto the true vertical and true horizontal reference axes.
-    # True vertical in pixel space = (sin θ, cos θ); true horizontal = (cos θ, -sin θ).
+    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
+    # True horizontal is perpendicular: (cos θ, sin θ).
     roll_rad = math.radians(camera_roll)
     cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-    along_vert  = dx * sin_r + dy * cos_r   # positive = shin leans toward true down
-    along_horiz = dx * cos_r - dy * sin_r   # positive = shin leans toward true right
+    along_vert  = -dx * sin_r + dy * cos_r   # positive = shin points toward true down
+    along_horiz =  dx * cos_r + dy * sin_r   # positive = shin leans toward true right
     # Tibial angle = deviation from true vertical. Always ≥ 0.
     return math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
 
@@ -165,13 +166,14 @@ def _depth_angle_at_frame(fdata: dict, side: str, camera_roll: float = 0.0) -> f
     """
     hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side)
     # Project kt→hc onto the true vertical and true horizontal reference axes.
-    # True vertical in pixel space = (sin θ, cos θ); true horizontal = (cos θ, -sin θ).
+    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
+    # True horizontal is perpendicular: (cos θ, sin θ).
     dx = hc_x - kt_x
     dy = hc_y - kt_y
     roll_rad = math.radians(camera_roll)
     cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-    along_vert  = dx * sin_r + dy * cos_r   # positive = hc is below kt in gravity = depth
-    along_horiz = dx * cos_r - dy * sin_r
+    along_vert  = -dx * sin_r + dy * cos_r   # positive = hc is below kt in gravity = depth
+    along_horiz =  dx * cos_r + dy * sin_r
     # Angle from true horizontal: positive = hc below kt = depth achieved.
     return math.degrees(math.atan2(along_vert, max(abs(along_horiz), 1e-6)))
 
@@ -637,12 +639,12 @@ class RepStateMachine:
             smooth_val: current smoothed hip_y (unused here, available if needed).
         """
         hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, self.side)
-        # Project kt→hc onto the true vertical reference axis (sin θ, cos θ).
+        # Project kt→hc onto the true vertical reference axis (-sin θ, cos θ).
         # along_vert > 0 means hc is below kt in gravity coords = depth achieved.
         dx = hc_x - kt_x
         dy = hc_y - kt_y
         roll_rad = math.radians(self.camera_roll)
-        along_vert = dx * math.sin(roll_rad) + dy * math.cos(roll_rad)
+        along_vert = -dx * math.sin(roll_rad) + dy * math.cos(roll_rad)
         at_depth = along_vert > 0
         self._depth_flags.append(at_depth)
 

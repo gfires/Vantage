@@ -30,6 +30,7 @@ from depth_detector import (
 )
 from rendering.draw import (
     GRAPH_FRAMES,
+    _draw_axes_compass,
     _draw_backgrounds,
     _draw_coaching_panel,
     _draw_graph,
@@ -234,6 +235,8 @@ def _process_video(
         _draw_backgrounds(overlay, w, h, rep_num, None, last_rep)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
+        _draw_axes_compass(frame, camera_roll)
+
         if fdata_draw is not None:
             frame_h     = fdata["height"]
             (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
@@ -250,8 +253,8 @@ def _process_video(
                 dy = knee[1] - heel[1]
                 roll_rad = math.radians(camera_roll)
                 cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-                along_vert  = dx * sin_r + dy * cos_r
-                along_horiz = dx * cos_r - dy * sin_r
+                along_vert  = -dx * sin_r + dy * cos_r
+                along_horiz =  dx * cos_r + dy * sin_r
                 tib_angle = math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
 
             is_bottom = (sm.bottom_frame is not None and frame_idx == sm.bottom_frame)

@@ -18,18 +18,21 @@ import math
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import cv2
 import numpy as np
 
-# ── Tunable constants ─────────────────────────────────────────────────────────
-PROBE_FRAMES       = 5
-BLUR_KERNEL        = (5, 5)
-CANNY_LOW          = 50
-CANNY_HIGH         = 150
-HOUGH_THRESHOLD    = 40       # accumulator votes (half-res, so halved from full-res 80)
-HOUGH_MIN_LENGTH   = 40       # px at half-res
-HOUGH_MAX_GAP      = 10       # px at half-res
-UPRIGHT_TOL_DEG    = 20       # lines within this many degrees of vertical are candidates
+from params import (
+    CAL_PROBE_FRAMES,
+    CAL_BLUR_KERNEL,
+    CAL_CANNY_LOW,
+    CAL_CANNY_HIGH,
+    CAL_HOUGH_THRESHOLD,
+    CAL_HOUGH_MIN_LENGTH,
+    CAL_HOUGH_MAX_GAP,
+    CAL_UPRIGHT_TOL_DEG,
+)
 
 
 def detect_upright_tilt(frames: list) -> float | None:
@@ -76,13 +79,13 @@ def _detect_upright(frame_full: np.ndarray) -> tuple[float | None, tuple | None]
     small = cv2.resize(frame_full, (W // 2, H // 2))
 
     gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    blur  = cv2.GaussianBlur(gray, BLUR_KERNEL, 0)
-    edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
+    blur  = cv2.GaussianBlur(gray, CAL_BLUR_KERNEL, 0)
+    edges = cv2.Canny(blur, CAL_CANNY_LOW, CAL_CANNY_HIGH)
     lines = cv2.HoughLinesP(
         edges, 1, np.pi / 180,
-        threshold=HOUGH_THRESHOLD,
-        minLineLength=HOUGH_MIN_LENGTH,
-        maxLineGap=HOUGH_MAX_GAP,
+        threshold=CAL_HOUGH_THRESHOLD,
+        minLineLength=CAL_HOUGH_MIN_LENGTH,
+        maxLineGap=CAL_HOUGH_MAX_GAP,
     )
 
     if lines is None:
@@ -100,7 +103,7 @@ def _detect_upright(frame_full: np.ndarray) -> tuple[float | None, tuple | None]
             continue
         # Angle from vertical: atan2(|dx|, |dy|) → 0° = perfectly vertical
         angle_from_vertical = math.degrees(math.atan2(abs(dx), abs(dy)))
-        if angle_from_vertical > UPRIGHT_TOL_DEG:
+        if angle_from_vertical > CAL_UPRIGHT_TOL_DEG:
             continue
         if length > best_len:
             best_len  = length
@@ -182,7 +185,7 @@ def run(video_path: str) -> None:
     angles:           list[float | None] = []
     annotated_frames: list[np.ndarray]   = []
 
-    for i in range(PROBE_FRAMES):
+    for i in range(CAL_PROBE_FRAMES):
         ret, raw = cap.read()
         if not ret:
             print(f"Frame {i}: video ended early")

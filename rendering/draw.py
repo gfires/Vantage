@@ -125,6 +125,53 @@ def _coaching_panel_coords(frame_w):
 
 # ── Draw functions ────────────────────────────────────────────────────────────
 
+def _draw_axes_compass(frame, camera_roll: float) -> None:
+    """
+    Top-left debug box showing calibrated vertical and horizontal axes.
+
+    Draws a small compass: two crossed arrows radiating from a centre point,
+    rotated by camera_roll so they represent true gravity axes in pixel space.
+    Labeled V (vertical, green) and H (horizontal, white), plus the roll value.
+    """
+    PAD = 12
+    BOX_W, BOX_H = 110, 110
+    x0, y0 = PAD, PAD
+    x1, y1 = x0 + BOX_W, y0 + BOX_H
+
+    cv2.rectangle(frame, (x0, y0), (x1, y1), DARK, -1)
+    cv2.rectangle(frame, (x0, y0), (x1, y1), GRAY, 1)
+
+    cx = x0 + BOX_W // 2
+    cy = y0 + BOX_H // 2
+    ARM = 36  # half-length of each axis arrow
+
+    roll_rad = math.radians(camera_roll)
+    sin_r, cos_r = math.sin(roll_rad), math.cos(roll_rad)
+
+    # True vertical axis in pixel space: direction (-sin θ, cos θ) points downward.
+    # Positive camera_roll = clockwise = true gravity leans left of pixel-down.
+    vx = int(round(cx - sin_r * ARM))
+    vy = int(round(cy + cos_r * ARM))
+    vx_neg = int(round(cx + sin_r * ARM))
+    vy_neg = int(round(cy - cos_r * ARM))
+    cv2.arrowedLine(frame, (cx, cy), (vx, vy),         GREEN, 2, cv2.LINE_AA, tipLength=0.25)
+    cv2.arrowedLine(frame, (cx, cy), (vx_neg, vy_neg), GREEN, 1, cv2.LINE_AA, tipLength=0.2)
+
+    # True horizontal axis in pixel space: direction (cos θ, sin θ) points right.
+    hx = int(round(cx + cos_r * ARM))
+    hy = int(round(cy + sin_r * ARM))
+    hx_neg = int(round(cx - cos_r * ARM))
+    hy_neg = int(round(cy - sin_r * ARM))
+    cv2.arrowedLine(frame, (cx, cy), (hx, hy),         WHITE, 2, cv2.LINE_AA, tipLength=0.25)
+    cv2.arrowedLine(frame, (cx, cy), (hx_neg, hy_neg), WHITE, 1, cv2.LINE_AA, tipLength=0.2)
+
+    cv2.putText(frame, "V", (vx_neg - 10, vy_neg + 4),  cv2.FONT_HERSHEY_SIMPLEX, 0.4, GREEN, 1, cv2.LINE_AA)
+    cv2.putText(frame, "H", (hx + 4, hy + 4),           cv2.FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1, cv2.LINE_AA)
+
+    roll_label = f"{camera_roll:+.1f}deg" if camera_roll != 0.0 else "0.0deg"
+    cv2.putText(frame, roll_label, (x0 + 6, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.38, GRAY, 1, cv2.LINE_AA)
+
+
 def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None, is_bottom=False):
     """Draw joint connections and circles for the selected side."""
     hip      = _pt(fdata[f"{side}_hip"])
