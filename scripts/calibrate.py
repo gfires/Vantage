@@ -32,6 +32,22 @@ HOUGH_MAX_GAP      = 10       # px at half-res
 UPRIGHT_TOL_DEG    = 20       # lines within this many degrees of vertical are candidates
 
 
+def detect_upright_tilt(frames: list) -> float | None:
+    """
+    Compute the median rack-upright tilt across a list of frames.
+
+    Args:
+        frames: BGR frames (full-resolution, already rotated for device orientation).
+
+    Returns:
+        Median tilt in degrees (positive = top leans right of pixel-vertical), or
+        None if no upright was detected in any frame.
+    """
+    angles = [_detect_upright(f)[0] for f in frames]
+    valid  = [a for a in angles if a is not None]
+    return float(np.median(valid)) if valid else None
+
+
 def _get_rotation(cap: cv2.VideoCapture) -> int:
     return int(cap.get(cv2.CAP_PROP_ORIENTATION_META))
 
