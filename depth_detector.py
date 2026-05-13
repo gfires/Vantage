@@ -60,8 +60,8 @@ JOINTS = {
     "right_shoulder": {"idx": RIGHT_SHOULDER,  "vis": False, "z": False},
     "left_wrist":     {"idx": LEFT_WRIST,      "vis": False, "z": False},
     "right_wrist":    {"idx": RIGHT_WRIST,     "vis": False, "z": False},
-    "left_heel":      {"idx": LEFT_HEEL,       "vis": False, "z": False},
-    "right_heel":     {"idx": RIGHT_HEEL,      "vis": False, "z": False},
+    "left_heel":      {"idx": LEFT_HEEL,       "vis": True,  "z": False},
+    "right_heel":     {"idx": RIGHT_HEEL,      "vis": True,  "z": False},
 }
 
 

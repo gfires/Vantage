@@ -32,6 +32,7 @@ from params import (
     CAL_HOUGH_MIN_LENGTH,
     CAL_HOUGH_MAX_GAP,
     CAL_UPRIGHT_TOL_DEG,
+    VISIBILITY_THRESHOLD,
 )
 
 
@@ -49,6 +50,73 @@ def detect_upright_tilt(frames: list) -> float | None:
     angles = [_detect_upright(f)[0] for f in frames]
     valid  = [a for a in angles if a is not None]
     return float(np.median(valid)) if valid else None
+
+
+def detect_heel_azimuth(fdata_list: list) -> dict | None:
+    """
+    Estimate camera azimuth from the heel-to-heel vector across a list of fdata dicts.
+
+    The vector from left_heel to right_heel is the lateral axis (along the bar)
+    projected onto the image plane. Its angle from image-horizontal is the azimuth
+    offset: 0° means the camera is dead side-on, 90° means front/rear.
+
+    Args:
+        fdata_list: list of per-frame landmark dicts (or None) from _infer_one_frame.
+                    Heels must have visibility enabled (vis=True in JOINTS).
+
+    Returns:
+        dict with keys:
+            azimuth_deg   float  angle of heel vector from image-horizontal (0=side-on, 90=front)
+            heel_vec_deg  float  raw image-plane angle of left→right heel vector (degrees)
+            left_heel     (x, y) averaged left heel pixel position
+            right_heel    (x, y) averaged right heel pixel position
+            n_frames      int    number of frames that contributed
+        or None if insufficient confident heel detections.
+    """
+    left_xs, left_ys, right_xs, right_ys = [], [], [], []
+
+    for fdata in fdata_list:
+        if fdata is None:
+            continue
+        lh = fdata.get("left_heel")
+        rh = fdata.get("right_heel")
+        if lh is None or rh is None:
+            continue
+        # Heels now have visibility as 3rd element (index 2)
+        lvis = lh[2] if len(lh) > 2 else 0.0
+        rvis = rh[2] if len(rh) > 2 else 0.0
+        if lvis < VISIBILITY_THRESHOLD or rvis < VISIBILITY_THRESHOLD:
+            continue
+        left_xs.append(lh[0]);  left_ys.append(lh[1])
+        right_xs.append(rh[0]); right_ys.append(rh[1])
+
+    if not left_xs:
+        return None
+
+    lx = sum(left_xs)  / len(left_xs)
+    ly = sum(left_ys)  / len(left_ys)
+    rx = sum(right_xs) / len(right_xs)
+    ry = sum(right_ys) / len(right_ys)
+
+    dx = rx - lx
+    dy = ry - ly
+
+    # Angle of left→right vector from image-horizontal
+    heel_vec_deg = math.degrees(math.atan2(-dy, dx))  # negate dy: screen y is flipped
+
+    # Azimuth = how far the camera is from pure side-on.
+    # Side-on: heels overlap (vector ~ zero length, azimuth undefined).
+    # Front-on: heel vector is horizontal, heel_vec_deg ~ 0°.
+    # The azimuth is the complement: how horizontal the heel vector is.
+    azimuth_deg = 90.0 - abs(heel_vec_deg)
+
+    return {
+        "azimuth_deg":  round(azimuth_deg,  1),
+        "heel_vec_deg": round(heel_vec_deg,  1),
+        "left_heel":    (lx, ly),
+        "right_heel":   (rx, ry),
+        "n_frames":     len(left_xs),
+    }
 
 
 def _get_rotation(cap: cv2.VideoCapture) -> int:
@@ -139,8 +207,9 @@ def _annotate_frame(
     frame_idx: int,
     tilt_deg: float | None,
     line_full,
+    heel_info: dict | None = None,
 ) -> np.ndarray:
-    """Draw upright line, reference vertical, and angle text onto a copy of frame."""
+    """Draw upright line, reference vertical, heel vector, and angle text onto a copy of frame."""
     out = frame.copy()
     H, W = out.shape[:2]
 
@@ -161,6 +230,19 @@ def _annotate_frame(
         label = f"Frame {frame_idx}  no upright detected"
         color = (0, 60, 220)
 
+    # Heel vector overlay — cyan dot per heel, line between them, azimuth label
+    if heel_info is not None:
+        lh = (int(heel_info["left_heel"][0]),  int(heel_info["left_heel"][1]))
+        rh = (int(heel_info["right_heel"][0]), int(heel_info["right_heel"][1]))
+        cv2.circle(out, lh, 8, (200, 200, 0), -1, cv2.LINE_AA)
+        cv2.circle(out, rh, 8, (200, 200, 0), -1, cv2.LINE_AA)
+        cv2.line(out, lh, rh, (200, 200, 0), 2, cv2.LINE_AA)
+        az  = heel_info["azimuth_deg"]
+        hvd = heel_info["heel_vec_deg"]
+        az_label = f"azimuth ~{az:.1f}°  heel vec {hvd:+.1f}°"
+        cv2.putText(out, az_label, (22, H - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 0), 2, cv2.LINE_AA)
+
     # Text background for readability
     font       = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.9
@@ -173,6 +255,8 @@ def _annotate_frame(
 
 
 def run(video_path: str) -> None:
+    from depth_detector import _ensure_model, _get_rotation as _dr_get_rotation, _make_detector, _infer_one_frame, _rotate_frame as _dr_rotate_frame
+
     path = Path(video_path)
     cap  = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -182,26 +266,44 @@ def run(video_path: str) -> None:
     cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
     rotation = _get_rotation(cap)
 
-    angles:           list[float | None] = []
-    annotated_frames: list[np.ndarray]   = []
+    _ensure_model()
 
-    for i in range(CAL_PROBE_FRAMES):
-        ret, raw = cap.read()
-        if not ret:
-            print(f"Frame {i}: video ended early")
-            break
-        raw = _rotate_frame(raw, rotation)
-        tilt_deg, line_full = _detect_upright(raw)
-        angles.append(tilt_deg)
-        annotated_frames.append(_annotate_frame(raw, i, tilt_deg, line_full))
+    angles:           list[float | None] = []
+    fdata_list:       list               = []
+    raw_frames:       list[np.ndarray]   = []
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    with _make_detector() as detector:
+        for i in range(CAL_PROBE_FRAMES):
+            ret, raw = cap.read()
+            if not ret:
+                print(f"Frame {i}: video ended early")
+                break
+            raw = _rotate_frame(raw, rotation)
+            raw_frames.append(raw)
+            tilt_deg, _ = _detect_upright(raw)
+            angles.append(tilt_deg)
+            fdata = _infer_one_frame(raw, detector, i, fps)
+            fdata_list.append(fdata)
 
     cap.release()
+
+    # Compute heel azimuth from averaged fdata across probe frames
+    heel_info = detect_heel_azimuth(fdata_list)
+
+    # Annotate frames — pass heel_info (averaged, not per-frame) to every frame
+    annotated_frames = [
+        _annotate_frame(raw_frames[i], i, angles[i],
+                        _detect_upright(raw_frames[i])[1], heel_info)
+        for i in range(len(raw_frames))
+    ]
 
     # ── Terminal output ───────────────────────────────────────────────────────
     print()
     for i, a in enumerate(angles):
         if a is not None:
-            print(f"  Frame {i}: {a:+.1f}°")
+            print(f"  Frame {i}: upright {a:+.1f}°")
         else:
             print(f"  Frame {i}: no upright detected")
 
@@ -211,6 +313,13 @@ def run(video_path: str) -> None:
         print(f"\n  Median tilt: {median:+.1f}°")
     else:
         print("\n  Median tilt: n/a (no uprights detected in any frame)")
+
+    print()
+    if heel_info is not None:
+        print(f"  Heel vector: {heel_info['heel_vec_deg']:+.1f}° from image-horizontal  ({heel_info['n_frames']} frames)")
+        print(f"  Azimuth:     ~{heel_info['azimuth_deg']:.1f}°  (0=side-on, 90=front/rear)")
+    else:
+        print("  Heel vector: n/a (heels not detected with sufficient confidence)")
     print()
 
     # ── Write output image ────────────────────────────────────────────────────
