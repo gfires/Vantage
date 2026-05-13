@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 import params  # mutated directly to avoid re-importing the module tree
 
-from depth_detector import _ensure_model, _get_rotation, _extract_landmarks
+from pose import _ensure_model, _get_rotation, _extract_landmarks
 from visualization.visualize import _analyze
 
 RESOLUTIONS = [None, 720, 480, 360]   # None = full resolution baseline
@@ -46,7 +46,7 @@ def _time_inference(video_path: Path, inf_height: int | None) -> dict:
     # Probe source resolution
     ret, first = cap.read()
     if ret:
-        from depth_detector import _rotate_frame
+        from pose import _rotate_frame
         first = _rotate_frame(first, rotation)
         src_h, src_w = first.shape[:2]
     else:

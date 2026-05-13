@@ -74,7 +74,7 @@ trends. Needs Approach B as the per-lift engine underneath — natural v2.
 ```
 whitelights/
   app.py              # Streamlit UI — upload, display, trigger analysis
-  depth_detector.py   # MediaPipe pose extraction + IPF depth threshold logic
+  pose.py   # MediaPipe pose extraction + IPF depth threshold logic
   metrics.py          # Back angle + bar path calculations (consolidated, split later if needed)
   overlay.py          # OpenCV annotation: returns list of annotated frames (in-memory)
   analyzer.py         # Claude API call → 3-sentence post-lift breakdown (optional)
@@ -209,8 +209,8 @@ and what to work on. Use powerlifting terminology. Do not use generic fitness la
 
 ## Next Steps
 
-1. Set up project structure: `app.py`, `depth_detector.py`, `requirements.txt`
-2. Implement `depth_detector.py` with MediaPipe — extract landmarks, calculate hip/knee
+1. Set up project structure: `app.py`, `pose.py`, `requirements.txt`
+2. Implement `pose.py` with MediaPipe — extract landmarks, calculate hip/knee
    y-positions, implement the IPF threshold check
 3. Film and label test set: 20 videos (10 clear pass, 5 clear fail, 5 borderline),
    human-labeled by you and/or a teammate before running the algorithm. This is the

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 
-from depth_detector import (
+from pose import (
     JOINTS,
     _ensure_model,
     _get_rotation,
@@ -112,7 +112,7 @@ def _make_smooth_bufs() -> dict:
     """
     Allocate the per-joint rolling buffers used by _smooth_one_frame.
 
-    Driven by the JOINTS registry in depth_detector so the joint list stays
+    Driven by the JOINTS registry in pose so the joint list stays
     in one place.  Extra tuple fields (visibility, z) are handled generically
     via raw[2:] in _smooth_one_frame — no per-joint metadata needed here.
 

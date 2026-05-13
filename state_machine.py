@@ -54,7 +54,7 @@ from params import (
     KNEE_TOP_OVERSHOOT,
     TIBIAL_WARN_DEG,
 )
-from depth_detector import _max_consecutive_true
+from pose import _max_consecutive_true
 from metrics import compute_flags
 
 
@@ -76,7 +76,7 @@ def _hip_crease_y(fdata: dict, side: str) -> float:
     shoulder to hip joint center (slightly above the joint center).
 
     Args:
-        fdata: per-frame landmark dict from depth_detector._extract_landmarks.
+        fdata: per-frame landmark dict from pose._extract_landmarks.
         side:  "left" | "right"
 
     Returns:
@@ -389,7 +389,7 @@ class RepStateMachine:
         Args:
             frame_idx: global frame index (0-based, monotonically increasing).
             fdata:     landmark dict for this frame as returned by
-                       depth_detector._extract_landmarks(), or None if MediaPipe
+                       pose._extract_landmarks(), or None if MediaPipe
                        produced no pose for this frame.
 
         Returns:

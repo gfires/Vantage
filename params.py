@@ -3,7 +3,7 @@ params.py — All tunable constants for WhiteLights squat analysis.
 
 Centralised here so depth detection, metrics, and visualisation share a
 single source of truth.  Import from this module rather than defining
-duplicates in depth_detector, metrics, or visualize.
+duplicates in pose, metrics, or visualize.
 """
 
 # ── Anatomical marker estimation ──────────────────────────────────────────────
