@@ -33,6 +33,7 @@ from params import (
     CAL_HOUGH_MIN_LENGTH,
     CAL_HOUGH_MAX_GAP,
     CAL_UPRIGHT_TOL_DEG,
+    CAL_SAGITTAL_TOL_DEG,
 )
 
 
@@ -135,6 +136,71 @@ def _extend_to_frame_height(x1, y1, x2, y2, H: int) -> tuple[int, int, int, int]
     return top_x, 0, bottom_x, H
 
 
+def _canny_edges(frame_full: np.ndarray) -> np.ndarray:
+    """Half-res Canny edge image, reusable across detectors."""
+    H, W = frame_full.shape[:2]
+    small = cv2.resize(frame_full, (W // 2, H // 2))
+    gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    blur  = cv2.GaussianBlur(gray, CAL_BLUR_KERNEL, 0)
+    return cv2.Canny(blur, CAL_CANNY_LOW, CAL_CANNY_HIGH)
+
+
+def _best_line_near_angle(edges: np.ndarray, target_deg: float, tol_deg: float):
+    """
+    Longest HoughLinesP segment within tol_deg of target_deg (lines are undirected).
+    Returns (x1, y1, x2, y2) in the coords of edges, or None.
+    """
+    lines = cv2.HoughLinesP(
+        edges, 1, np.pi / 180,
+        threshold=CAL_HOUGH_THRESHOLD,
+        minLineLength=CAL_HOUGH_MIN_LENGTH,
+        maxLineGap=CAL_HOUGH_MAX_GAP,
+    )
+    if lines is None:
+        return None
+    best_seg, best_len = None, 0.0
+    for seg in lines:
+        x1, y1, x2, y2 = seg[0]
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+        line_deg = math.degrees(math.atan2(dy, dx))
+        diff = min(
+            abs(((line_deg       - target_deg) + 180) % 360 - 180),
+            abs(((line_deg + 180 - target_deg) + 180) % 360 - 180),
+        )
+        if diff <= tol_deg and length > best_len:
+            best_len, best_seg = length, (x1, y1, x2, y2)
+    return best_seg
+
+
+def _detect_sagittal(frame_full: np.ndarray, edges: np.ndarray, knee_y_full: float | None) -> tuple[float | None, tuple | None]:
+    """
+    Longest near-horizontal Canny line in a ±10%-of-frame-height band around knee_y_full.
+    Falls back to the bottom half when knee_y_full is None.
+
+    Returns (sag_deg, (x1, y1, x2, y2)) in full-res coords, or (None, None).
+    """
+    eh = edges.shape[0]
+    if knee_y_full is not None:
+        knee_y_half = knee_y_full / 2.0
+        band = int(eh * 0.10)
+        y0 = max(0, int(knee_y_half) - band)
+        y1 = min(eh, int(knee_y_half) + band)
+    else:
+        y0, y1 = eh // 2, eh
+
+    seg = _best_line_near_angle(edges[y0:y1, :], target_deg=0.0, tol_deg=CAL_SAGITTAL_TOL_DEG)
+    if seg is None:
+        return None, None
+    x1, y1s, x2, y2s = seg
+    return (
+        math.degrees(math.atan2(y2s - y1s, x2 - x1)),
+        (x1 * 2, (y1s + y0) * 2, x2 * 2, (y2s + y0) * 2),
+    )
+
+
 def _landmark_vec(fdata: dict | None, left_key: str, right_key: str, vis_thresh: float = 0.5):
     """
     Extract a (left_pt, right_pt) pixel tuple from fdata if both landmarks exceed vis_thresh.
@@ -184,6 +250,8 @@ def _annotate_frame(
     line_full,
     azimuth_label: str | None,
     azimuth_vec,
+    sag_deg: float | None = None,
+    sag_line_full=None,
 ) -> np.ndarray:
     """
     Draw all detected calibration data onto a copy of frame:
@@ -228,24 +296,29 @@ def _annotate_frame(
         az_deg   = math.degrees(math.atan2(ady, adx))
         _draw_axis(out, cx, cy, adx, ady, AXIS_LEN, CYAN, "az")
 
-        # Sagittal: perpendicular to azimuth in the image plane (rotate 90° CCW)
-        sdx, sdy = -ady, adx
-        sag_deg  = math.degrees(math.atan2(sdy, sdx))
-        _draw_axis(out, cx, cy, sdx, sdy, AXIS_LEN, ORANGE, "sag")
+        az_text = f"azimuth ({azimuth_label}): {az_deg:+.1f}°"
 
-        az_text = f"azimuth ({azimuth_label}): {az_deg:+.1f}°  sagittal: {sag_deg:+.1f}°"
+    # Sagittal Canny line — orange, extended full height
+    sag_str = "n/a"
+    if sag_line_full is not None:
+        sx1, sy1, sx2, sy2 = sag_line_full
+        esx1, esy1, esx2, esy2 = _extend_to_frame_height(sx1, sy1, sx2, sy2, H)
+        cv2.line(out, (esx1, esy1), (esx2, esy2), ORANGE, 2, cv2.LINE_AA)
+        sag_str = f"{sag_deg:+.1f}°"
 
     # ── Text overlay ──────────────────────────────────────────────────────────
     font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
-    rows = [upright_text, az_text]
+    sag_text = f"sagittal (edge): {sag_str}"
+    rows = [upright_text, az_text, sag_text]
     max_w  = max(cv2.getTextSize(r, font, scale, thick)[0][0] for r in rows)
     _, th  = cv2.getTextSize("X", font, scale, thick)[0]
     base   = cv2.getTextSize("X", font, scale, thick)[1]
     line_h = th + base + 6
     box_h  = line_h * len(rows) + 10
     cv2.rectangle(out, (16, 16), (16 + max_w + 12, 16 + box_h), (0, 0, 0), -1)
-    cv2.putText(out, upright_text, (22, 16 + th + 4),          font, scale, upright_color, thick, cv2.LINE_AA)
-    cv2.putText(out, az_text,      (22, 16 + th + 4 + line_h), font, scale, CYAN,          thick, cv2.LINE_AA)
+    cv2.putText(out, upright_text, (22, 16 + th + 4),              font, scale, upright_color, thick, cv2.LINE_AA)
+    cv2.putText(out, az_text,      (22, 16 + th + 4 + line_h),     font, scale, CYAN,          thick, cv2.LINE_AA)
+    cv2.putText(out, sag_text,     (22, 16 + th + 4 + line_h * 2), font, scale, ORANGE,        thick, cv2.LINE_AA)
 
     return out
 
@@ -271,15 +344,21 @@ def run(video_path: str) -> None:
             if not ret:
                 print(f"Frame {i}: video ended early")
                 break
-            raw = _rotate_frame(raw, rotation)
+            raw   = _rotate_frame(raw, rotation)
+            edges = _canny_edges(raw)
             tilt_deg, line_full = _detect_upright(raw)
             angles.append(tilt_deg)
 
             fdata = _pose._infer_one_frame(raw, detector, i, fps)
             az_label, az_vec = _azimuth_from_fdata(fdata)
 
+            knee_y = None
+            if fdata is not None:
+                knee_y = (fdata["left_knee"][1] + fdata["right_knee"][1]) / 2.0
+            sag_deg, sag_line_full = _detect_sagittal(raw, edges, knee_y)
+
             annotated_frames.append(
-                _annotate_frame(raw, i, tilt_deg, line_full, az_label, az_vec)
+                _annotate_frame(raw, i, tilt_deg, line_full, az_label, az_vec, sag_deg, sag_line_full)
             )
 
     cap.release()
