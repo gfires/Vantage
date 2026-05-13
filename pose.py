@@ -49,10 +49,10 @@ JOINTS = {
     "right_knee":     {"idx": 26, "vis": True,  "z": False},
     "left_shoulder":  {"idx": 11, "vis": False, "z": False},
     "right_shoulder": {"idx": 12, "vis": False, "z": False},
-    "left_wrist":     {"idx": 15, "vis": False, "z": False},
-    "right_wrist":    {"idx": 16, "vis": False, "z": False},
-    "left_heel":      {"idx": 29, "vis": False, "z": False},
-    "right_heel":     {"idx": 30, "vis": False, "z": False},
+    "left_wrist":     {"idx": 15, "vis": True, "z": False},
+    "right_wrist":    {"idx": 16, "vis": True, "z": False},
+    "left_heel":      {"idx": 29, "vis": True, "z": False},
+    "right_heel":     {"idx": 30, "vis": True, "z": False},
 }
 
 

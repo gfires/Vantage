@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import cv2
 import numpy as np
+import pose as _pose
 
 from params import (
     CAL_PROBE_FRAMES,
@@ -134,40 +135,117 @@ def _extend_to_frame_height(x1, y1, x2, y2, H: int) -> tuple[int, int, int, int]
     return top_x, 0, bottom_x, H
 
 
+def _landmark_vec(fdata: dict | None, left_key: str, right_key: str, vis_thresh: float = 0.5):
+    """
+    Extract a (left_pt, right_pt) pixel tuple from fdata if both landmarks exceed vis_thresh.
+    Requires vis=True for both joints in JOINTS (visibility at tuple index 2).
+    """
+    if fdata is None:
+        return None
+    lm = fdata[left_key]
+    rm = fdata[right_key]
+    if lm[2] < vis_thresh or rm[2] < vis_thresh:
+        return None
+    return (int(lm[0]), int(lm[1])), (int(rm[0]), int(rm[1]))
+
+
+def _azimuth_from_fdata(fdata: dict | None):
+    """
+    Compute azimuth vector: heels first, wrists as fallback.
+    Returns (source_label, (left_pt, right_pt)) or (None, None).
+    """
+    heel_vec  = _landmark_vec(fdata, "left_heel",  "right_heel")
+    if heel_vec is not None:
+        return "heels", heel_vec
+    wrist_vec = _landmark_vec(fdata, "left_wrist", "right_wrist")
+    if wrist_vec is not None:
+        return "wrists", wrist_vec
+    return None, None
+
+
+def _draw_axis(out: np.ndarray, cx: int, cy: int, dx: float, dy: float,
+               length: int, color: tuple, label: str) -> None:
+    """Draw a centered axis arrow of given pixel half-length from (cx, cy) along (dx, dy)."""
+    norm = math.hypot(dx, dy)
+    if norm < 1e-6:
+        return
+    ux, uy = dx / norm, dy / norm
+    p1 = (int(cx - ux * length), int(cy - uy * length))
+    p2 = (int(cx + ux * length), int(cy + uy * length))
+    cv2.line(out, p1, p2, color, 3, cv2.LINE_AA)
+    cv2.arrowedLine(out, p1, p2, color, 3, cv2.LINE_AA, tipLength=0.15)
+    cv2.putText(out, label, (p2[0] + 6, p2[1] + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+
+
 def _annotate_frame(
     frame: np.ndarray,
     frame_idx: int,
     tilt_deg: float | None,
     line_full,
+    azimuth_label: str | None,
+    azimuth_vec,
 ) -> np.ndarray:
-    """Draw upright line, reference vertical, and angle text onto a copy of frame."""
+    """
+    Draw all detected calibration data onto a copy of frame:
+      - Green: vertical axis (rack upright + reference line)
+      - Cyan:  azimuth axis (heels or wrists), centered on landmark midpoint
+      - Orange: sagittal axis (perpendicular to azimuth in image plane)
+    """
     out = frame.copy()
     H, W = out.shape[:2]
 
+    # ── Vertical axis (rack upright) ─────────────────────────────────────────
+    GREEN = (0, 220, 0)
     if tilt_deg is not None and line_full is not None:
         x1, y1, x2, y2 = line_full
         ex1, ey1, ex2, ey2 = _extend_to_frame_height(x1, y1, x2, y2, H)
-
-        # Detected upright — bright green, extended full height
-        cv2.line(out, (ex1, ey1), (ex2, ey2), (0, 220, 0), 2, cv2.LINE_AA)
-
-        # Reference vertical — white, through the midpoint x of the detected line
+        cv2.line(out, (ex1, ey1), (ex2, ey2), GREEN, 2, cv2.LINE_AA)
         mid_x = (ex1 + ex2) // 2
         cv2.line(out, (mid_x, 0), (mid_x, H), (220, 220, 220), 1, cv2.LINE_AA)
-
-        label = f"Frame {frame_idx}  upright: {tilt_deg:+.1f}° from vertical"
-        color = (0, 220, 0)
+        upright_text  = f"Frame {frame_idx}  vertical: {tilt_deg:+.1f}° from pixel-vertical"
+        upright_color = GREEN
     else:
-        label = f"Frame {frame_idx}  no upright detected"
-        color = (0, 60, 220)
+        upright_text  = f"Frame {frame_idx}  vertical: not detected"
+        upright_color = (0, 60, 220)
 
-    # Text background for readability
-    font       = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.9
-    thickness  = 2
-    (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-    cv2.rectangle(out, (16, 16), (16 + tw + 12, 16 + th + baseline + 10), (0, 0, 0), -1)
-    cv2.putText(out, label, (22, 16 + th + 4), font, font_scale, color, thickness, cv2.LINE_AA)
+    # ── Azimuth + sagittal axes ───────────────────────────────────────────────
+    CYAN   = (255, 255,   0)
+    ORANGE = (0,   165, 255)
+    AXIS_LEN = min(W, H) // 6
+
+    az_text = "azimuth: n/a  (sagittal: n/a)"
+    if azimuth_vec is not None:
+        lp, rp = azimuth_vec
+        cx = (lp[0] + rp[0]) // 2
+        cy = (lp[1] + rp[1]) // 2
+
+        # Draw the raw landmark points
+        cv2.circle(out, lp, 7, CYAN, -1)
+        cv2.circle(out, rp, 7, CYAN, -1)
+
+        # Azimuth direction: left→right along landmark pair
+        adx, ady = rp[0] - lp[0], rp[1] - lp[1]
+        az_deg   = math.degrees(math.atan2(ady, adx))
+        _draw_axis(out, cx, cy, adx, ady, AXIS_LEN, CYAN, "az")
+
+        # Sagittal: perpendicular to azimuth in the image plane (rotate 90° CCW)
+        sdx, sdy = -ady, adx
+        sag_deg  = math.degrees(math.atan2(sdy, sdx))
+        _draw_axis(out, cx, cy, sdx, sdy, AXIS_LEN, ORANGE, "sag")
+
+        az_text = f"azimuth ({azimuth_label}): {az_deg:+.1f}°  sagittal: {sag_deg:+.1f}°"
+
+    # ── Text overlay ──────────────────────────────────────────────────────────
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2
+    rows = [upright_text, az_text]
+    max_w  = max(cv2.getTextSize(r, font, scale, thick)[0][0] for r in rows)
+    _, th  = cv2.getTextSize("X", font, scale, thick)[0]
+    base   = cv2.getTextSize("X", font, scale, thick)[1]
+    line_h = th + base + 6
+    box_h  = line_h * len(rows) + 10
+    cv2.rectangle(out, (16, 16), (16 + max_w + 12, 16 + box_h), (0, 0, 0), -1)
+    cv2.putText(out, upright_text, (22, 16 + th + 4),          font, scale, upright_color, thick, cv2.LINE_AA)
+    cv2.putText(out, az_text,      (22, 16 + th + 4 + line_h), font, scale, CYAN,          thick, cv2.LINE_AA)
 
     return out
 
@@ -181,19 +259,28 @@ def run(video_path: str) -> None:
 
     cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
     rotation = _get_rotation(cap)
+    fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     angles:           list[float | None] = []
     annotated_frames: list[np.ndarray]   = []
 
-    for i in range(CAL_PROBE_FRAMES):
-        ret, raw = cap.read()
-        if not ret:
-            print(f"Frame {i}: video ended early")
-            break
-        raw = _rotate_frame(raw, rotation)
-        tilt_deg, line_full = _detect_upright(raw)
-        angles.append(tilt_deg)
-        annotated_frames.append(_annotate_frame(raw, i, tilt_deg, line_full))
+    _pose._ensure_model()
+    with _pose._make_detector() as detector:
+        for i in range(CAL_PROBE_FRAMES):
+            ret, raw = cap.read()
+            if not ret:
+                print(f"Frame {i}: video ended early")
+                break
+            raw = _rotate_frame(raw, rotation)
+            tilt_deg, line_full = _detect_upright(raw)
+            angles.append(tilt_deg)
+
+            fdata = _pose._infer_one_frame(raw, detector, i, fps)
+            az_label, az_vec = _azimuth_from_fdata(fdata)
+
+            annotated_frames.append(
+                _annotate_frame(raw, i, tilt_deg, line_full, az_label, az_vec)
+            )
 
     cap.release()
 
