@@ -14,6 +14,7 @@ Used by:
 """
 
 import math
+import statistics
 from collections import deque
 from pathlib import Path
 
@@ -21,12 +22,14 @@ import cv2
 
 from pose import (
     JOINTS,
+    CameraCalibration,
     _ensure_model,
     _get_rotation,
     _infer_one_frame,
     _make_detector,
     _rotate_frame,
     _select_side,
+    azimuth_deg_from_fdata,
 )
 from rendering.draw import (
     GRAPH_FRAMES,
@@ -48,7 +51,7 @@ from params import (
     PIPELINE_DELAY,
 )
 from scripts.calibrate import detect_upright_tilt
-from state_machine import RepStateMachine
+from state_machine import RepStateMachine, _tibial_angle as _sm_tibial_angle
 
 
 
@@ -216,12 +219,12 @@ def _process_video(
     knee_y_deque = deque(maxlen=GRAPH_FRAMES)
 
     # Populated during probe phase; read by _emit closure and RepStateMachine.
-    camera_roll: float = 0.0
+    cal = CameraCalibration()
 
     # ── Inner helpers ─────────────────────────────────────────────────────────
     def _emit(frame_idx: int, frame, fdata, side: str, sm: RepStateMachine) -> None:
         """Draw overlays onto frame and write/stream it."""
-        nonlocal out, w, h
+        nonlocal out, w, h, cal
 
         fdata_draw = _smooth_one_frame(fdata, bufs)
 
@@ -235,7 +238,7 @@ def _process_video(
         _draw_backgrounds(overlay, w, h, rep_num, None, last_rep)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
-        _draw_axes_compass(frame, camera_roll)
+        _draw_axes_compass(frame, cal)
 
         if fdata_draw is not None:
             frame_h     = fdata["height"]
@@ -247,15 +250,7 @@ def _process_video(
             if last_rep is not None:
                 tib_angle = last_rep["tibial"]["angles"].get(frame_idx)
             if tib_angle is None and fdata is not None:
-                heel = fdata[f"{side}_heel"]
-                knee = fdata[f"{side}_knee"]
-                dx = knee[0] - heel[0]
-                dy = knee[1] - heel[1]
-                roll_rad = math.radians(camera_roll)
-                cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-                along_vert  = -dx * sin_r + dy * cos_r
-                along_horiz =  dx * cos_r + dy * sin_r
-                tib_angle = math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
+                tib_angle = _sm_tibial_angle(fdata, side, cal)
 
             is_bottom = (sm.bottom_frame is not None and frame_idx == sm.bottom_frame)
 
@@ -325,12 +320,23 @@ def _process_video(
         if probe_raw_frames:
             tilt = detect_upright_tilt(probe_raw_frames)
             if tilt is not None:
-                camera_roll = tilt
-                print(f"  Camera roll: {camera_roll:+.1f}° (rack upright detected — correcting angles)")
+                cal = CameraCalibration(roll_deg=tilt)
+                print(f"  Camera roll: {tilt:+.1f}° (rack upright detected — correcting angles)")
             else:
                 print("  Camera roll: n/a (no rack upright detected — using raw pixel coords)")
 
-        sm = RepStateMachine(frame_height=h, fps=fps, side=side, camera_roll=camera_roll)
+        # Extract azimuth: median across all valid probe frames (heels first, wrists fallback)
+        az_samples = []
+        for _, fdata_probe in probe_valid:
+            az = azimuth_deg_from_fdata(fdata_probe)
+            if az is not None:
+                az_samples.append(az)
+        if az_samples:
+            az = statistics.median(az_samples)
+            cal = CameraCalibration(roll_deg=cal.roll_deg, azimuth_deg=az)
+            print(f"  Azimuth:     {az:+.1f}° from vertical (sin correction: {math.sin(math.radians(az)):.3f})")
+
+        sm = RepStateMachine(frame_height=h, fps=fps, side=side, cal=cal)
 
         # ── Main decode loop ──────────────────────────────────────────────────
         while True:

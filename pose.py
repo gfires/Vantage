@@ -8,7 +8,9 @@ segmentation, metrics) lives elsewhere.
 The pose model (~9MB) is downloaded automatically on first run to models/.
 """
 
+import math
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -143,6 +145,71 @@ def _rotate_frame(frame, angle: int):
     if angle == 270:
         return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     return frame
+
+
+# ── Camera calibration ────────────────────────────────────────────────────────
+
+@dataclass
+class CameraCalibration:
+    roll_deg: float = 0.0     # vertical tilt (Hough upright); positive = top leans right
+    azimuth_deg: float = 0.0  # φ from vertical; 0° = pure side profile, 90° = facing camera
+                               # correction factor = sin(φ); at φ≈90° (side-on) sin≈1 → minimal change
+
+
+def _landmark_vec(fdata: dict | None, left_key: str, right_key: str, vis_thresh: float = 0.5):
+    """
+    Extract (left_pt, right_pt) pixel tuple from fdata if both landmarks exceed vis_thresh.
+    Returns None if fdata is None or either landmark is below threshold.
+    """
+    if fdata is None:
+        return None
+    lm = fdata[left_key]
+    rm = fdata[right_key]
+    if lm[2] < vis_thresh or rm[2] < vis_thresh:
+        return None
+    return (int(lm[0]), int(lm[1])), (int(rm[0]), int(rm[1]))
+
+
+def _azimuth_from_fdata(fdata: dict | None):
+    """
+    Compute azimuth vector: heels first, wrists as fallback.
+    Returns (source_label, (left_pt, right_pt)) or (None, None).
+    """
+    heel_vec = _landmark_vec(fdata, "left_heel", "right_heel")
+    if heel_vec is not None:
+        return "heels", heel_vec
+    wrist_vec = _landmark_vec(fdata, "left_wrist", "right_wrist")
+    if wrist_vec is not None:
+        return "wrists", wrist_vec
+    return None, None
+
+
+def azimuth_deg_from_fdata(fdata: dict | None) -> float | None:
+    """
+    Compute φ (degrees from side profile) from fdata heel/wrist landmarks.
+
+    Convention:
+        φ = 0°  → heel vector vertical (degenerate) → pure side profile → sin(φ)=0, no correction
+        φ = 90° → heel vector horizontal            → facing camera     → sin(φ)=1, full correction
+
+    Returns None if no suitable landmarks are visible.
+    """
+    label, vec = _azimuth_from_fdata(fdata)
+    if vec is None:
+        return None
+    left_pt, right_pt = vec
+    dx = right_pt[0] - left_pt[0]
+    dy = right_pt[1] - left_pt[1]
+    return math.degrees(math.atan2(abs(dx), max(abs(dy), 1e-6)))
+
+
+def _max_consecutive_true(flags: list[bool]) -> int:
+    """Return the length of the longest run of True values in flags."""
+    best = cur = 0
+    for f in flags:
+        cur = cur + 1 if f else 0
+        best = max(best, cur)
+    return best
 
 
 # ── Side selection ────────────────────────────────────────────────────────────

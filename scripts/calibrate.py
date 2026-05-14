@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import cv2
 import numpy as np
 import pose as _pose
+from pose import _landmark_vec, _azimuth_from_fdata
 
 from params import (
     CAL_PROBE_FRAMES,
@@ -33,6 +34,7 @@ from params import (
     CAL_HOUGH_MIN_LENGTH,
     CAL_HOUGH_MAX_GAP,
     CAL_UPRIGHT_TOL_DEG,
+    CAL_TILT_MAX_DEG,
 )
 
 
@@ -40,16 +42,16 @@ def detect_upright_tilt(frames: list) -> float | None:
     """
     Compute the median rack-upright tilt across a list of frames.
 
+    Returns 0.0 if no upright is detected in any frame.
+    Result is clamped to ±CAL_TILT_MAX_DEG (default ±4°).
+
     Args:
         frames: BGR frames (full-resolution, already rotated for device orientation).
-
-    Returns:
-        Median tilt in degrees (positive = top leans right of pixel-vertical), or
-        None if no upright was detected in any frame.
     """
     angles = [_detect_upright(f)[0] for f in frames]
     valid  = [a for a in angles if a is not None]
-    return float(np.median(valid)) if valid else None
+    raw    = float(np.median(valid)) if valid else 0.0
+    return max(-CAL_TILT_MAX_DEG, min(CAL_TILT_MAX_DEG, raw))
 
 
 def _get_rotation(cap: cv2.VideoCapture) -> int:
@@ -159,33 +161,6 @@ def _sagittal_from_upright(line_full, H: int, W: int):
     sag_deg = math.degrees(math.atan2(pdy, pdx))
     return sag_deg, (0, iy0, W, iy1)
 
-
-def _landmark_vec(fdata: dict | None, left_key: str, right_key: str, vis_thresh: float = 0.5):
-    """
-    Extract a (left_pt, right_pt) pixel tuple from fdata if both landmarks exceed vis_thresh.
-    Requires vis=True for both joints in JOINTS (visibility at tuple index 2).
-    """
-    if fdata is None:
-        return None
-    lm = fdata[left_key]
-    rm = fdata[right_key]
-    if lm[2] < vis_thresh or rm[2] < vis_thresh:
-        return None
-    return (int(lm[0]), int(lm[1])), (int(rm[0]), int(rm[1]))
-
-
-def _azimuth_from_fdata(fdata: dict | None):
-    """
-    Compute azimuth vector: heels first, wrists as fallback.
-    Returns (source_label, (left_pt, right_pt)) or (None, None).
-    """
-    heel_vec  = _landmark_vec(fdata, "left_heel",  "right_heel")
-    if heel_vec is not None:
-        return "heels", heel_vec
-    wrist_vec = _landmark_vec(fdata, "left_wrist", "right_wrist")
-    if wrist_vec is not None:
-        return "wrists", wrist_vec
-    return None, None
 
 
 def _draw_axis(out: np.ndarray, cx: int, cy: int, dx: float, dy: float,
@@ -323,10 +298,11 @@ def run(video_path: str) -> None:
 
     valid = [a for a in angles if a is not None]
     if valid:
-        median = float(np.median(valid))
-        print(f"\n  Median tilt: {median:+.1f}°")
+        raw    = float(np.median(valid))
+        capped = max(-CAL_TILT_MAX_DEG, min(CAL_TILT_MAX_DEG, raw))
+        print(f"\n  Median tilt: {raw:+.1f}° (capped → {capped:+.1f}°)")
     else:
-        print("\n  Median tilt: n/a (no uprights detected in any frame)")
+        print("\n  Median tilt: 0.0° (no uprights detected — defaulting to 0)")
     print()
 
     # ── Write output image ────────────────────────────────────────────────────
