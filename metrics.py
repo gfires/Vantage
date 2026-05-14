@@ -2,7 +2,7 @@
 metrics.py — Per-rep coaching metrics computed from frames_data.
 
 All functions take frames_data (list of per-frame dicts or None, as returned
-by depth_detector._extract_landmarks) and operate on the selected side.
+by pose._extract_landmarks) and operate on the selected side.
 """
 
 import math

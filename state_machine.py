@@ -54,7 +54,7 @@ from params import (
     KNEE_TOP_OVERSHOOT,
     TIBIAL_WARN_DEG,
 )
-from depth_detector import _max_consecutive_true
+from pose import _max_consecutive_true
 from metrics import compute_flags
 
 
@@ -76,7 +76,7 @@ def _hip_crease_y(fdata: dict, side: str) -> float:
     shoulder to hip joint center (slightly above the joint center).
 
     Args:
-        fdata: per-frame landmark dict from depth_detector._extract_landmarks.
+        fdata: per-frame landmark dict from pose._extract_landmarks.
         side:  "left" | "right"
 
     Returns:
@@ -115,7 +115,7 @@ def _estimated_markers(fdata: dict, side: str) -> tuple[float, float, float, flo
     return hc_y, kt_y, hc_x, kt_x
 
 
-def _tibial_angle(fdata: dict, side: str) -> float:
+def _tibial_angle(fdata: dict, side: str, camera_roll: float = 0.0) -> float:
     """
     Compute shin angle from vertical for one frame (degrees).
 
@@ -123,20 +123,30 @@ def _tibial_angle(fdata: dict, side: str) -> float:
     0° = perfectly vertical shin. Increases as knee travels forward over toe.
 
     Args:
-        fdata: per-frame landmark dict.
-        side:  "left" | "right"
+        fdata:       per-frame landmark dict.
+        side:        "left" | "right"
+        camera_roll: camera tilt in degrees; subtracted so result is relative
+                     to gravitational vertical.
 
     Returns:
         Angle in degrees, ≥ 0.
     """
     heel = fdata[f"{side}_heel"]
     knee = fdata[f"{side}_knee"]
-    dx   = abs(knee[0] - heel[0])
-    dy   = abs(heel[1] - knee[1])
-    return math.degrees(math.atan2(dx, max(dy, 1e-6)))
+    dx = knee[0] - heel[0]
+    dy = knee[1] - heel[1]
+    # Project heel→knee onto the true vertical and true horizontal reference axes.
+    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
+    # True horizontal is perpendicular: (cos θ, sin θ).
+    roll_rad = math.radians(camera_roll)
+    cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
+    along_vert  = -dx * sin_r + dy * cos_r   # positive = shin points toward true down
+    along_horiz =  dx * cos_r + dy * sin_r   # positive = shin leans toward true right
+    # Tibial angle = deviation from true vertical. Always ≥ 0.
+    return math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
 
 
-def _depth_angle_at_frame(fdata: dict, side: str) -> float:
+def _depth_angle_at_frame(fdata: dict, side: str, camera_roll: float = 0.0) -> float:
     """
     Compute the signed depth angle at a single frame.
 
@@ -146,18 +156,26 @@ def _depth_angle_at_frame(fdata: dict, side: str) -> float:
         0        = exactly parallel
 
     Args:
-        fdata: per-frame landmark dict (typically the bottom frame).
-        side:  "left" | "right"
+        fdata:       per-frame landmark dict (typically the bottom frame).
+        side:        "left" | "right"
+        camera_roll: camera tilt in degrees; subtracted so result is relative
+                     to gravitational horizontal.
 
     Returns:
         Angle in degrees, signed.
     """
     hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side)
-    # Angle of the hc→kt segment against the horizontal.
-    # positive = hc below kt = depth achieved, negative = hc above kt = short.
-    rise = hc_y - kt_y
-    run  = abs(kt_x - hc_x)
-    return math.degrees(math.atan2(rise, max(run, 1e-6)))
+    # Project kt→hc onto the true vertical and true horizontal reference axes.
+    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
+    # True horizontal is perpendicular: (cos θ, sin θ).
+    dx = hc_x - kt_x
+    dy = hc_y - kt_y
+    roll_rad = math.radians(camera_roll)
+    cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
+    along_vert  = -dx * sin_r + dy * cos_r   # positive = hc is below kt in gravity = depth
+    along_horiz =  dx * cos_r + dy * sin_r
+    # Angle from true horizontal: positive = hc below kt = depth achieved.
+    return math.degrees(math.atan2(along_vert, max(abs(along_horiz), 1e-6)))
 
 
 # ── Metric builders ───────────────────────────────────────────────────────────
@@ -310,7 +328,7 @@ class RepStateMachine:
             # for live drawing decisions
     """
 
-    def __init__(self, frame_height: float, fps: float, side: str) -> None:
+    def __init__(self, frame_height: float, fps: float, side: str, camera_roll: float = 0.0) -> None:
         """
         Args:
             frame_height: full-resolution frame height in pixels.
@@ -318,10 +336,14 @@ class RepStateMachine:
             fps:          video frame rate.  Used to convert frame counts to seconds.
             side:         "left" | "right" — which landmark side to use.
                           Determined by _select_side() before the loop begins.
+            camera_roll:  camera tilt in degrees (positive = pixel-vertical leans right
+                          of true vertical).  Subtracted from all angle computations so
+                          results are relative to gravitational vertical/horizontal.
         """
         self.frame_height = frame_height
         self.fps          = fps
         self.side         = side
+        self.camera_roll  = camera_roll
 
         # ── Public state (safe to read between feed() calls for live drawing) ──
         self.phase: Phase          = Phase.STANDING
@@ -367,7 +389,7 @@ class RepStateMachine:
         Args:
             frame_idx: global frame index (0-based, monotonically increasing).
             fdata:     landmark dict for this frame as returned by
-                       depth_detector._extract_landmarks(), or None if MediaPipe
+                       pose._extract_landmarks(), or None if MediaPipe
                        produced no pose for this frame.
 
         Returns:
@@ -616,15 +638,21 @@ class RepStateMachine:
             fdata:      landmark dict for this frame.
             smooth_val: current smoothed hip_y (unused here, available if needed).
         """
-        hc_y, kt_y, _, _ = _estimated_markers(fdata, self.side)
-        at_depth = hc_y > kt_y
+        hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, self.side)
+        # Project kt→hc onto the true vertical reference axis (-sin θ, cos θ).
+        # along_vert > 0 means hc is below kt in gravity coords = depth achieved.
+        dx = hc_x - kt_x
+        dy = hc_y - kt_y
+        roll_rad = math.radians(self.camera_roll)
+        along_vert = -dx * math.sin(roll_rad) + dy * math.cos(roll_rad)
+        at_depth = along_vert > 0
         self._depth_flags.append(at_depth)
 
-        gap = abs(hc_y - kt_y)
+        gap = abs(along_vert)
         if gap < self._min_gap_px:
             self._min_gap_px = gap
 
-        angle = _tibial_angle(fdata, self.side)
+        angle = _tibial_angle(fdata, self.side, self.camera_roll)
         self._tibial_angles[frame_idx] = round(angle, 1)
 
         if self.phase == Phase.DESCENDING:
@@ -704,7 +732,7 @@ class RepStateMachine:
         tempo["flags"] = flags
 
         depth_angle = (
-            _depth_angle_at_frame(self._bottom_fdata, self.side)
+            _depth_angle_at_frame(self._bottom_fdata, self.side, self.camera_roll)
             if self._bottom_fdata is not None
             else None
         )

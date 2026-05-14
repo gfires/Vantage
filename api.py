@@ -20,7 +20,7 @@ import cv2
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
-from depth_detector import _ensure_model, _get_rotation
+from pose import _ensure_model, _get_rotation
 from metrics import compute_flags
 from params import HOLE_EXIT_FRACTION
 from rendering.pipeline import _process_video

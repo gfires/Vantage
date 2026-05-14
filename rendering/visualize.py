@@ -20,7 +20,7 @@ from pathlib import Path
 
 import cv2
 
-from depth_detector import (
+from pose import (
     _ensure_model,
     _get_rotation,
 )

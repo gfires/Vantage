@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 
-from depth_detector import (
+from pose import (
     JOINTS,
     _ensure_model,
     _get_rotation,
@@ -30,6 +30,7 @@ from depth_detector import (
 )
 from rendering.draw import (
     GRAPH_FRAMES,
+    _draw_axes_compass,
     _draw_backgrounds,
     _draw_coaching_panel,
     _draw_graph,
@@ -46,6 +47,7 @@ from params import (
     DRAW_SMOOTHING,
     PIPELINE_DELAY,
 )
+from scripts.calibrate import detect_upright_tilt
 from state_machine import RepStateMachine
 
 
@@ -110,7 +112,7 @@ def _make_smooth_bufs() -> dict:
     """
     Allocate the per-joint rolling buffers used by _smooth_one_frame.
 
-    Driven by the JOINTS registry in depth_detector so the joint list stays
+    Driven by the JOINTS registry in pose so the joint list stays
     in one place.  Extra tuple fields (visibility, z) are handled generically
     via raw[2:] in _smooth_one_frame — no per-joint metadata needed here.
 
@@ -213,6 +215,9 @@ def _process_video(
     hip_y_deque  = deque(maxlen=GRAPH_FRAMES)
     knee_y_deque = deque(maxlen=GRAPH_FRAMES)
 
+    # Populated during probe phase; read by _emit closure and RepStateMachine.
+    camera_roll: float = 0.0
+
     # ── Inner helpers ─────────────────────────────────────────────────────────
     def _emit(frame_idx: int, frame, fdata, side: str, sm: RepStateMachine) -> None:
         """Draw overlays onto frame and write/stream it."""
@@ -230,6 +235,8 @@ def _process_video(
         _draw_backgrounds(overlay, w, h, rep_num, None, last_rep)
         cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
 
+        _draw_axes_compass(frame, camera_roll)
+
         if fdata_draw is not None:
             frame_h     = fdata["height"]
             (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
@@ -242,9 +249,13 @@ def _process_video(
             if tib_angle is None and fdata is not None:
                 heel = fdata[f"{side}_heel"]
                 knee = fdata[f"{side}_knee"]
-                dx   = abs(knee[0] - heel[0])
-                dy   = abs(heel[1] - knee[1])
-                tib_angle = math.degrees(math.atan2(dx, max(dy, 1e-6)))
+                dx = knee[0] - heel[0]
+                dy = knee[1] - heel[1]
+                roll_rad = math.radians(camera_roll)
+                cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
+                along_vert  = -dx * sin_r + dy * cos_r
+                along_horiz =  dx * cos_r + dy * sin_r
+                tib_angle = math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
 
             is_bottom = (sm.bottom_frame is not None and frame_idx == sm.bottom_frame)
 
@@ -284,6 +295,7 @@ def _process_video(
 
         # Read probe frames to fill PIPELINE_DELAY-deep buffer and select side
         probe_valid: list[tuple[int, dict]] = []
+        probe_raw_frames: list = []
         while frame_idx < PIPELINE_DELAY:
             ret, raw = cap.read()
             if not ret:
@@ -291,6 +303,7 @@ def _process_video(
             raw = _rotate_frame(raw, rotation)
             if frame_idx == 0:
                 h, w = raw.shape[:2]
+            probe_raw_frames.append(raw)
             fdata = _infer_one_frame(raw, detector, frame_idx, fps)
             frame_buf.append((frame_idx, raw))
             fdata_buf.append(fdata)
@@ -309,7 +322,15 @@ def _process_video(
             # No frames decoded at all
             return []
 
-        sm = RepStateMachine(frame_height=h, fps=fps, side=side)
+        if probe_raw_frames:
+            tilt = detect_upright_tilt(probe_raw_frames)
+            if tilt is not None:
+                camera_roll = tilt
+                print(f"  Camera roll: {camera_roll:+.1f}° (rack upright detected — correcting angles)")
+            else:
+                print("  Camera roll: n/a (no rack upright detected — using raw pixel coords)")
+
+        sm = RepStateMachine(frame_height=h, fps=fps, side=side, camera_roll=camera_roll)
 
         # ── Main decode loop ──────────────────────────────────────────────────
         while True:

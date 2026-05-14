@@ -7,7 +7,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from pathlib import Path
-from depth_detector import (
+from pose import (
     _get_rotation, _rotate_frame, _extract_landmarks, _select_side,
     _rolling_average, _find_bottom_frame, _ensure_model,
     LEFT_HIP, LEFT_KNEE, RIGHT_HIP, RIGHT_KNEE, VISIBILITY_THRESHOLD

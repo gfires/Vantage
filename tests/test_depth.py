@@ -1,5 +1,5 @@
 """
-Test harness for depth_detector.py against labeled squat videos.
+Test harness for pose.py against labeled squat videos.
 
 Usage:
     python tests/test_depth.py
@@ -16,7 +16,7 @@ from pathlib import Path
 # Allow running from project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from depth_detector import analyze_video
+from pose import analyze_video
 
 VIDEOS_DIR = Path(__file__).parent / "videos"
 LABELS_FILE = Path(__file__).parent / "labels.json"
