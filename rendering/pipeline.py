@@ -286,100 +286,107 @@ def _process_video(
     side: str | None = force_side
     sm: RepStateMachine | None = None
 
-    with _make_detector() as detector:
-        frame_idx = 0
+    try:
+        with _make_detector() as detector:
+            frame_idx = 0
 
-        # Read probe frames to fill PIPELINE_DELAY-deep buffer and select side
-        probe_valid: list[tuple[int, dict]] = []
-        probe_raw_frames: list = []
-        while frame_idx < PIPELINE_DELAY:
-            ret, raw = cap.read()
-            if not ret:
-                break
-            raw = _rotate_frame(raw, rotation)
-            if frame_idx == 0:
-                h, w = raw.shape[:2]
-            probe_raw_frames.append(raw)
-            fdata = _infer_one_frame(raw, detector, frame_idx, fps)
-            frame_buf.append((frame_idx, raw))
-            fdata_buf.append(fdata)
-            if fdata is not None:
-                probe_valid.append((frame_idx, fdata))
-            frame_idx += 1
+            # Read probe frames to fill PIPELINE_DELAY-deep buffer and select side
+            probe_valid: list[tuple[int, dict]] = []
+            probe_raw_frames: list = []
+            while frame_idx < PIPELINE_DELAY:
+                ret, raw = cap.read()
+                if not ret:
+                    break
+                raw = _rotate_frame(raw, rotation)
+                if frame_idx == 0:
+                    h, w = raw.shape[:2]
+                probe_raw_frames.append(raw)
+                fdata = _infer_one_frame(raw, detector, frame_idx, fps)
+                frame_buf.append((frame_idx, raw))
+                fdata_buf.append(fdata)
+                if fdata is not None:
+                    probe_valid.append((frame_idx, fdata))
+                frame_idx += 1
 
-        if side is None:
-            if probe_valid:
-                side = _select_side(probe_valid)
             if side is None:
-                side = "right"
-                # TODO: fix this edge case by falling back to a non-side-specific heuristic (e.g. which hip is more visible on average across the probe frames) instead of just defaulting to right and hoping for the best.
+                if probe_valid:
+                    side = _select_side(probe_valid)
+                if side is None:
+                    side = "right"
+                    # TODO: fix this edge case by falling back to a non-side-specific heuristic (e.g. which hip is more visible on average across the probe frames) instead of just defaulting to right and hoping for the best.
 
-        if h == 0:
-            # No frames decoded at all
-            return []
+            if h == 0:
+                # No frames decoded at all
+                return []
 
-        if probe_raw_frames:
-            tilt = detect_upright_tilt(probe_raw_frames[:CAL_PROBE_FRAMES])
-            if tilt is not None:
-                cal = CameraCalibration(roll_deg=tilt)
-                print(f"  Camera roll: {tilt:+.1f}° (rack upright detected — correcting angles)")
-            else:
-                print("  Camera roll: n/a (no rack upright detected — using raw pixel coords)")
+            if probe_raw_frames:
+                tilt = detect_upright_tilt(probe_raw_frames[:CAL_PROBE_FRAMES])
+                if tilt is not None:
+                    cal = CameraCalibration(roll_deg=tilt)
+                    print(f"  Camera roll: {tilt:+.1f}° (rack upright detected — correcting angles)")
+                else:
+                    print("  Camera roll: n/a (no rack upright detected — using raw pixel coords)")
 
-        # Extract azimuth: median across first CAL_PROBE_FRAMES valid probe frames
-        az_samples = []
-        for _, fdata_probe in probe_valid[:CAL_PROBE_FRAMES]:
-            az = azimuth_deg_from_fdata(fdata_probe)
-            if az is not None:
-                az_samples.append(az)
-        if az_samples:
-            az = statistics.median(az_samples)
-            cal = CameraCalibration(roll_deg=cal.roll_deg, azimuth_deg=az)
-            print(f"  Azimuth:     {az:+.1f}° from vertical (sin correction: {math.sin(math.radians(az)):.3f})")
+            # Extract azimuth: median across first CAL_PROBE_FRAMES valid probe frames
+            az_samples = []
+            for _, fdata_probe in probe_valid[:CAL_PROBE_FRAMES]:
+                az = azimuth_deg_from_fdata(fdata_probe)
+                if az is not None:
+                    az_samples.append(az)
+            if az_samples:
+                az = statistics.median(az_samples)
+                cal = CameraCalibration(roll_deg=cal.roll_deg, azimuth_deg=az)
+                print(f"  Azimuth:     {az:+.1f}° from vertical (sin correction: {math.sin(math.radians(az)):.3f})")
 
-        sm = RepStateMachine(frame_height=h, fps=fps, side=side, cal=cal)
+            sm = RepStateMachine(frame_height=h, fps=fps, side=side, cal=cal)
 
-        # ── Main decode loop ──────────────────────────────────────────────────
-        while True:
-            ret, raw = cap.read()
-            if not ret:
-                break
-            raw   = _rotate_frame(raw, rotation)
-            fdata = _infer_one_frame(raw, detector, frame_idx, fps)
+            # ── Main decode loop ──────────────────────────────────────────────────
+            while True:
+                ret, raw = cap.read()
+                if not ret:
+                    break
+                raw   = _rotate_frame(raw, rotation)
+                fdata = _infer_one_frame(raw, detector, frame_idx, fps)
 
-            frame_buf.append((frame_idx, raw))
-            fdata_buf.append(fdata)
-            frame_idx += 1
+                frame_buf.append((frame_idx, raw))
+                fdata_buf.append(fdata)
+                frame_idx += 1
 
-            # Pop the oldest buffered frame (PIPELINE_DELAY frames behind)
-            if len(frame_buf) > PIPELINE_DELAY:
-                tail_idx, tail_frame = frame_buf.popleft()
-                tail_fdata           = fdata_buf.popleft()
+                # Pop the oldest buffered frame (PIPELINE_DELAY frames behind)
+                if len(frame_buf) > PIPELINE_DELAY:
+                    tail_idx, tail_frame = frame_buf.popleft()
+                    tail_fdata           = fdata_buf.popleft()
 
-                completed = sm.feed(tail_idx, tail_fdata)
-                if completed is not None:
-                    completed_reps.append(completed)
-                    last_rep = completed
+                    completed = sm.feed(tail_idx, tail_fdata)
+                    if completed is not None:
+                        completed_reps.append(completed)
+                        last_rep = completed
 
-                _emit(tail_idx, tail_frame, tail_fdata, side, sm)
+                    _emit(tail_idx, tail_frame, tail_fdata, side, sm)
 
-    # ── Flush phase: drain remaining buffered frames ──────────────────────────
-    while frame_buf:
-        tail_idx, tail_frame = frame_buf.popleft()
-        tail_fdata           = fdata_buf.popleft()
+        # ── Flush phase: drain remaining buffered frames ──────────────────────────
+        while frame_buf:
+            tail_idx, tail_frame = frame_buf.popleft()
+            tail_fdata           = fdata_buf.popleft()
 
-        completed = sm.feed(tail_idx, tail_fdata)
-        if completed is not None:
-            completed_reps.append(completed)
-            last_rep = completed
+            completed = sm.feed(tail_idx, tail_fdata)
+            if completed is not None:
+                completed_reps.append(completed)
+                last_rep = completed
 
-        _emit(tail_idx, tail_frame, tail_fdata, side, sm)
+            _emit(tail_idx, tail_frame, tail_fdata, side, sm)
 
-    # ── Teardown ──────────────────────────────────────────────────────────────
-    if out is not None:
-        out.release()
-    if on_frame is not None:
-        on_frame(None)
+    finally:
+        # ── Teardown ─────────────────────────────────────────────────────────────
+        # Always release the VideoWriter so the MP4 moov atom is written even if
+        # an exception aborts the loop mid-processing.
+        if out is not None:
+            out.release()
+        if on_frame is not None:
+            try:
+                on_frame(None)
+            except Exception:
+                pass
 
     return completed_reps
 

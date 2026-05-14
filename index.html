@@ -441,11 +441,15 @@
 
       // Swap MJPEG → H.264 video player
       const videoEl = document.createElement('video');
+      videoEl.id = 'mjpeg-stream';
       videoEl.src = `/download/${jobId}`;
       videoEl.controls = true;
       videoEl.autoplay = false;
       videoEl.loop = false;
-      mjpeg.replaceWith(videoEl);
+      videoEl.preload = 'auto';
+      videoEl.playsInline = true;
+      const currentStream = document.getElementById('mjpeg-stream');
+      currentStream.replaceWith(videoEl);
 
       // Render table
       renderTable(data.reps);
