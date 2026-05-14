@@ -68,6 +68,8 @@ def _serialise_reps(reps: list, fps: float) -> list[dict]:
             "descent_s": round(t.get("descent_s", 0), 2),
             "hole_s": _hole_s(rep, fps),
             "ascent_s": round(t.get("ascent_s", 0), 2),
+            "sticking_pct":     t.get("sticking_pct"),
+            "sticking_vel_pct": t.get("sticking_vel_pct"),
             "depth_angle": round(rep["depth_angle"], 1) if rep.get("depth_angle") is not None else None,
             "max_shin": round(tib["max_angle"], 0) if tib.get("max_angle") is not None else None,
             "warnings": compute_flags(rep["tempo"], rep["tibial"]),

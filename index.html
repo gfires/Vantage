@@ -477,6 +477,8 @@
       { label: 'Descent',     key: r => r.descent_s != null ? r.descent_s.toFixed(2) + 's' : '—' },
       { label: 'Hole',        key: r => r.hole_s    != null ? r.hole_s.toFixed(2)    + 's' : '—' },
       { label: 'Ascent',      key: r => r.ascent_s  != null ? r.ascent_s.toFixed(2)  + 's' : '—' },
+      { label: 'Stick pos',   key: r => r.sticking_pct     != null ? r.sticking_pct     + '%' : '—' },
+      { label: 'Stick vel',   key: r => r.sticking_vel_pct != null ? r.sticking_vel_pct + '% MCV' : '—' },
       { label: 'Depth angle', key: r => r.depth_angle != null ? (r.depth_angle > 0 ? '+' : '') + r.depth_angle.toFixed(1) + '°' : '—' },
       { label: 'Max shin',    key: r => r.max_shin != null ? r.max_shin + '°' : '—' },
       { label: 'Warnings',    key: r => warnHtml(r.warnings) },

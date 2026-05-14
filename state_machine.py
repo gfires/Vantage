@@ -50,6 +50,8 @@ from params import (
     ASCENT_RECOVERY_FRAC,
     CLOSE_THRESHOLD,
     HOLE_EXIT_FRACTION,
+    STICK_WINDOW_START,
+    STICK_WINDOW_END,
     TIBIAL_WARN_DEG,
 )
 from pose import _max_consecutive_true, CameraCalibration, estimated_markers
@@ -65,11 +67,6 @@ class Phase(Enum):
 
 
 # ── Geometry helpers (mirrors visualize._estimated_marker_ys and metrics) ─────
-
-def _hip_crease_y(fdata: dict, side: str, cal: "CameraCalibration | None" = None) -> float:
-    """Return hip-crease Y using the full estimated_markers computation."""
-    hc_y, _, _, _ = estimated_markers(fdata, side, cal)
-    return hc_y
 
 
 def _estimated_markers(
@@ -159,12 +156,12 @@ def _depth_angle_at_frame(fdata: dict, side: str, cal: "CameraCalibration | None
 def _build_tempo(
     descent_frames: int,
     ascent_frames: int,
-    ascent_hc_ys: list[float],
+    ascent_hip_ys: list[float],
     frame_height: float,
     fps: float,
 ) -> dict:
     """
-    Build the tempo dict from accumulated per-phase frame counts and hip-crease
+    Build the tempo dict from accumulated per-phase frame counts and raw hip
     Y positions recorded during the ascent.
 
     Mirrors compute_tempo() in metrics.py but operates on pre-accumulated data
@@ -173,26 +170,26 @@ def _build_tempo(
     Args:
         descent_frames:  number of frames from rep start to bottom (inclusive).
         ascent_frames:   number of frames from bottom to rep end (inclusive).
-        ascent_hc_ys:    list of hip-crease Y values recorded each ascent frame,
-                         starting at the bottom frame.  Length = ascent_frames.
+        ascent_hip_ys:    list of raw hip Y values recorded each ascent frame.
+                         Length = ascent_frames - MIN_HOLD_FRAMES.
         frame_height:    full-resolution frame height in pixels (for normalisation).
         fps:             video frame rate.
 
     Returns:
         Dict with keys: descent_s, ascent_s, velocity, mean_concentric_vel,
-        hole_exit_vel, hole_mcv_ratio, flags.
-        Matches the schema returned by metrics.compute_tempo().
+        hole_exit_vel, hole_mcv_ratio, sticking_pct, sticking_vel_pct.
+        Flags are intentionally absent — caller passes this to compute_flags().
     """
     descent_s = descent_frames / fps
     ascent_s  = ascent_frames  / fps
 
-    # Per-frame normalised velocity during ascent (length = len(ascent_hc_ys) - 1).
-    # hip_y decreases as the lifter rises → negate so positive = moving upward.
+    # Per-frame normalised velocity during ascent (length = len(ascent_hip_ys) - 1).
+    # hip Y decreases as the lifter rises → negate so positive = moving upward.
     # Normalised by frame_height so values are comparable across resolutions.
-    if len(ascent_hc_ys) >= 2:
+    if len(ascent_hip_ys) >= 2:
         velocity = [
-            -(ascent_hc_ys[i] - ascent_hc_ys[i - 1]) / frame_height * fps
-            for i in range(1, len(ascent_hc_ys))
+            -(ascent_hip_ys[i] - ascent_hip_ys[i - 1]) / frame_height * fps
+            for i in range(1, len(ascent_hip_ys))
         ]
     else:
         velocity = []
@@ -210,6 +207,26 @@ def _build_tempo(
     if hole_exit_vel is not None and mean_concentric_vel and mean_concentric_vel > 1e-6:
         hole_mcv_ratio = round(hole_exit_vel / mean_concentric_vel, 3)
 
+    # Sticking point: velocity minimum in the 25%–80% ascent window.
+    # Use a 3-frame centred average to suppress single-frame jitter before finding the min.
+    sticking_pct = None
+    sticking_vel_pct = None
+    n = len(velocity)
+    if n >= 2 and mean_concentric_vel and mean_concentric_vel > 1e-6:
+        w_start = int(n * STICK_WINDOW_START)
+        w_end   = int(n * STICK_WINDOW_END)
+        hw = 8  # half-window → 21-frame centred average
+        smoothed = [
+            sum(velocity[max(0, i - hw):min(n, i + hw + 1)]) / len(velocity[max(0, i - hw):min(n, i + hw + 1)])
+            for i in range(n)
+        ]
+        # Search only within [w_start, w_end] — smoothing reads freely from full list
+        window = [(i, smoothed[i]) for i in range(w_start, w_end)]
+        if window:
+            stick_idx, stick_vel_smooth = min(window, key=lambda x: x[1])
+            sticking_pct     = round(stick_idx / n * 100)
+            sticking_vel_pct = round(stick_vel_smooth / mean_concentric_vel * 100)
+
     return {
         "descent_s":           round(descent_s, 2),
         "ascent_s":            round(ascent_s, 2),
@@ -217,6 +234,8 @@ def _build_tempo(
         "mean_concentric_vel": mean_concentric_vel,
         "hole_exit_vel":       hole_exit_vel,
         "hole_mcv_ratio":      hole_mcv_ratio,
+        "sticking_pct":        sticking_pct,
+        "sticking_vel_pct":    sticking_vel_pct,
         # flags intentionally absent — caller passes this dict to compute_flags()
         # which owns all flag logic and returns them separately.
     }
@@ -343,7 +362,7 @@ class RepStateMachine:
         # ── Per-rep accumulators (reset on each new rep) ──────────────────────
         self._descent_frames:  int         = 0
         self._ascent_frames:   int         = 0
-        self._ascent_hc_ys:    list[float] = []   # hip-crease Y per ascent frame
+        self._ascent_hip_ys:    list[float] = []   # raw hip Y per ascent frame
         self._depth_flags:     list[bool]  = []   # hc_y > kt_y per rep frame
         self._min_gap_px:      float       = float("inf")  # min |hc_y - kt_y| across rep
         self._best_depth_av:   float       = -float("inf") # max along_vert seen this rep
@@ -512,12 +531,10 @@ class RepStateMachine:
             # The MIN_HOLD_FRAMES confirmation frames were already ascending —
             # seed ascent_frames so they're included in the timing.
             self._ascent_frames = MIN_HOLD_FRAMES
-            # Seed ascent accumulator with hip-crease Y at the bottom frame
-            if self._bottom_fdata is not None:
-                hc_y = _hip_crease_y(self._bottom_fdata, self.side, self.cal)
-                self._ascent_hc_ys = [hc_y]
-            else:
-                self._ascent_hc_ys = []
+            # Seed with current frame's hip Y so the first diff in _step_ascending
+            # is a clean 1-frame step (bottom fdata is 4 frames back — using it
+            # would produce a 4x spike on the first velocity sample).
+            self._ascent_hip_ys = [fdata[f"{self.side}_hip"][1]]
 
         return None
 
@@ -546,9 +563,8 @@ class RepStateMachine:
         Side effects:
             May set self.phase = Phase.STANDING, reset all _rep accumulators.
         """
-        # Accumulate hip-crease Y for velocity computation
-        hc_y = _hip_crease_y(fdata, self.side, self.cal)
-        self._ascent_hc_ys.append(hc_y)
+        # Accumulate raw hip Y for velocity computation
+        self._ascent_hip_ys.append(fdata[f"{self.side}_hip"][1])
         self._ascent_frames += 1
 
         # Recovered fraction: how far hip_y has returned toward standing (small) value.
@@ -668,7 +684,7 @@ class RepStateMachine:
         self._bottom_fdata            = None
         self._descent_frames          = 0
         self._ascent_frames           = 0
-        self._ascent_hc_ys            = []
+        self._ascent_hip_ys            = []
         self._depth_flags             = []
         self._min_gap_px              = float("inf")
         self._best_depth_av           = -float("inf")
@@ -697,7 +713,7 @@ class RepStateMachine:
         tempo  = _build_tempo(
             self._descent_frames,
             self._ascent_frames,
-            self._ascent_hc_ys,
+            self._ascent_hip_ys,
             frame_h,
             self.fps,
         )

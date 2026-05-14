@@ -180,6 +180,8 @@ Computed per rep after classification.
 | `mean_concentric_vel` | Mean hip-crease velocity over full ascent (frame-heights/s) |
 | `hole_exit_vel` | Mean velocity over first 25% of ascent (out-of-hole drive window) |
 | `hole_mcv_ratio` | `hole_exit_vel / mean_concentric_vel` — hole quality vs overall speed |
+| `sticking_pct` | Position of velocity minimum in the 25–80% ascent window (% of ascent) |
+| `sticking_vel_pct` | Velocity at sticking point as % of MCV (lower = bigger stall) |
 
 **Flags:**
 
@@ -189,6 +191,8 @@ Computed per rep after classification.
 | SLOW DESC | `descent_s > 4.0s` |
 | GRIND | `ascent_s > descent_s × 2` |
 | WEAK HOLE | `hole_mcv_ratio < 0.60` |
+| STICKING (MILD) | `sticking_vel_pct < 60` |
+| STICKING | `sticking_vel_pct < 40` |
 
 ### Tibial angle (`compute_tibial_angle`)
 
