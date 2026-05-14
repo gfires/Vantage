@@ -40,7 +40,7 @@ vantage/
 │   ├── draw.py             # All frame annotation primitives
 │   └── visualize.py        # CLI entry point — outputs annotated MP4 + rep table
 ├── scripts/
-│   └── calibrate.py        # Diagnostic: rack upright tilt detection (Hough, 5 probe frames)
+│   └── calibrate.py        # Diagnostic: 3-axis camera calibration (vertical + azimuth + sagittal, 5 probe frames)
 ├── models/
 │   └── pose_landmarker_full.task   # Auto-downloaded ~9MB MediaPipe model
 └── tests/
@@ -111,8 +111,8 @@ Extracts 10 joints per frame from MediaPipe's 33-landmark BlazePose model:
 | Hip (L/R) | 23/24 | x, y, visibility, z |
 | Knee (L/R) | 25/26 | x, y, visibility |
 | Shoulder (L/R) | 11/12 | x, y |
-| Heel (L/R) | 29/30 | x, y |
-| Wrist (L/R) | 15/16 | x, y |
+| Heel (L/R) | 29/30 | x, y, visibility |
+| Wrist (L/R) | 15/16 | x, y, visibility |
 
 Hip z-depth is used for side selection (negative = closer to camera).
 
@@ -301,7 +301,15 @@ Upload a side-profile squat video. The UI streams annotated frames live via MJPE
 .venv/bin/python scripts/calibrate.py path/to/video.MOV
 ```
 
-Runs rack upright tilt detection (Gaussian blur + Canny + HoughLinesP at half-res) on the first 5 frames. Prints per-frame tilt angle and median to terminal. Writes `<stem>_calibration.jpg` alongside the input — 5 annotated frames stacked vertically, each showing the detected upright (green), reference vertical (white), and angle label.
+Runs 3-axis calibration on the first 5 frames. Prints per-frame vertical tilt and median to terminal. Writes `<stem>_calibration.jpg` — 5 annotated frames stacked vertically, each showing:
+
+| Axis | Color | Method |
+|---|---|---|
+| Vertical | Green | Longest near-vertical Hough line (rack upright). Extended full frame height + white reference line. |
+| Azimuth | Cyan | BlazePose heel landmark vector (wrists as fallback). Centered arrow. |
+| Sagittal | Orange | Perpendicular to the detected vertical line through its midpoint, extended to frame width. |
+
+All three axes degrade gracefully: sagittal requires vertical; azimuth requires pose detection above 0.5 visibility.
 
 ---
 
@@ -328,7 +336,7 @@ Runs rack upright tilt detection (Gaussian blur + Canny + HoughLinesP at half-re
 
 ## In Progress / Not Yet Built
 
-- **Camera calibration integration**: `scripts/calibrate.py` detects rack upright tilt (vertical axis) as a standalone diagnostic. Next: horizontal axis via bilateral landmark vector (bar or shoulders), then integration into `_process_video` as a `CameraCalibration` preprocessing layer applied before all metrics
+- **Camera calibration integration**: `scripts/calibrate.py` detects all 3 axes — vertical (Hough), azimuth (heel/wrist landmarks), sagittal (perpendicular to vertical). Next: integrate as a `CameraCalibration` preprocessing layer in `_process_video` to rectify landmark coordinates before metric computation
 - **Perspective correction**: angle metrics (tibial, depth, back) are currently computed in raw pixel space — perspective-sensitive for non-ideal camera placement. Calibration will rectify landmark coordinates before metric computation
 - **Claude AI coaching**: Anthropic SDK in requirements, not wired
 - **GPU inference**: MediaPipe supports CoreML delegates; would reduce ~21.8ms → ~2–5ms/frame
