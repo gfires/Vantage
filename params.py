@@ -72,4 +72,5 @@ CAL_HOUGH_THRESHOLD   = 40   # HoughLinesP accumulator votes (at half-res)
 CAL_HOUGH_MIN_LENGTH  = 40   # minimum line length in pixels (at half-res)
 CAL_HOUGH_MAX_GAP     = 10   # maximum gap between collinear segments (at half-res)
 CAL_UPRIGHT_TOL_DEG   = 20   # lines within this many degrees of vertical are upright candidates
+CAL_TILT_MAX_DEG      = 4.0  # detected tilt clamped to this range; fallback 0.0 if no upright found
 CAL_SAGITTAL_TOL_DEG  = 25   # lines within this many degrees of horizontal are sagittal candidates

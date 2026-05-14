@@ -54,7 +54,7 @@ from params import (
     KNEE_TOP_OVERSHOOT,
     TIBIAL_WARN_DEG,
 )
-from pose import _max_consecutive_true
+from pose import _max_consecutive_true, CameraCalibration
 from metrics import compute_flags
 
 
@@ -115,67 +115,79 @@ def _estimated_markers(fdata: dict, side: str) -> tuple[float, float, float, flo
     return hc_y, kt_y, hc_x, kt_x
 
 
-def _tibial_angle(fdata: dict, side: str, camera_roll: float = 0.0) -> float:
+def _tibial_angle(fdata: dict, side: str, cal: "CameraCalibration | None" = None) -> float:
     """
-    Compute shin angle from vertical for one frame (degrees).
+    Compute shin angle from vertical for one frame (degrees), corrected for camera
+    roll and azimuth foreshortening.
 
-    Tibial angle = atan2(|knee_x - heel_x|, |knee_y - heel_y|).
-    0° = perfectly vertical shin. Increases as knee travels forward over toe.
+    Step 1 — roll correction: rotate (dx, dy) by camera_roll to decompose along the
+    true vertical/horizontal axes (adjusts frame of reference, not coordinates).
 
-    Args:
-        fdata:       per-frame landmark dict.
-        side:        "left" | "right"
-        camera_roll: camera tilt in degrees; subtracted so result is relative
-                     to gravitational vertical.
+    Step 2 — azimuth correction: φ is measured from vertical (0°=side profile,
+    90°=facing camera). The foreshortening factor is sin(φ) = cos(90°−φ), where
+    90°−φ is the angle from side profile.
+        tan(θ_obs) = tan(θ_true) × sin(φ)  →  θ_true = atan(tan(θ_obs) / sin(φ))
 
     Returns:
         Angle in degrees, ≥ 0.
     """
+    roll_deg    = cal.roll_deg    if cal is not None else 0.0
+    azimuth_deg = cal.azimuth_deg if cal is not None else 0.0
+
     heel = fdata[f"{side}_heel"]
     knee = fdata[f"{side}_knee"]
     dx = knee[0] - heel[0]
     dy = knee[1] - heel[1]
-    # Project heel→knee onto the true vertical and true horizontal reference axes.
-    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
-    # True horizontal is perpendicular: (cos θ, sin θ).
-    roll_rad = math.radians(camera_roll)
+
+    roll_rad = math.radians(roll_deg)
     cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-    along_vert  = -dx * sin_r + dy * cos_r   # positive = shin points toward true down
-    along_horiz =  dx * cos_r + dy * sin_r   # positive = shin leans toward true right
-    # Tibial angle = deviation from true vertical. Always ≥ 0.
-    return math.degrees(math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6)))
+    along_vert  = -dx * sin_r + dy * cos_r
+    along_horiz =  dx * cos_r + dy * sin_r
+    theta_obs = math.atan2(abs(along_horiz), max(abs(along_vert), 1e-6))
+    theta_obs_deg = math.degrees(theta_obs)
+
+    # phi is measured from vertical (0°=side profile, 90°=facing camera).
+    # Foreshortening factor is cos(angle_from_side_profile) = cos(90° - phi) = sin(phi).
+    sin_az = math.sin(math.radians(azimuth_deg))
+    if sin_az > 1e-6:
+        return math.degrees(math.atan(math.tan(theta_obs) / sin_az))
+    return theta_obs_deg
 
 
-def _depth_angle_at_frame(fdata: dict, side: str, camera_roll: float = 0.0) -> float:
+def _depth_angle_at_frame(fdata: dict, side: str, cal: "CameraCalibration | None" = None) -> float:
     """
-    Compute the signed depth angle at a single frame.
+    Compute the signed depth angle at a single frame, corrected for camera roll
+    and azimuth foreshortening.
 
     Convention:
         positive = hip crease below knee top (depth achieved)
         negative = hip crease above knee top (short)
-        0        = exactly parallel
 
-    Args:
-        fdata:       per-frame landmark dict (typically the bottom frame).
-        side:        "left" | "right"
-        camera_roll: camera tilt in degrees; subtracted so result is relative
-                     to gravitational horizontal.
+    Step 1 — roll correction: decompose hc→kt along true vertical/horizontal axes.
+    Step 2 — azimuth correction: foreshortening factor is sin(φ) where φ is
+    measured from vertical (0°=side profile, 90°=facing camera).
+        θ_true = atan(tan(θ_obs) / sin(φ))
+    Sign is preserved: the correction only magnifies the absolute angle.
 
     Returns:
         Angle in degrees, signed.
     """
+    roll_deg    = cal.roll_deg    if cal is not None else 0.0
+    azimuth_deg = cal.azimuth_deg if cal is not None else 0.0
+
     hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side)
-    # Project kt→hc onto the true vertical and true horizontal reference axes.
-    # Positive camera_roll = clockwise = true vertical is (-sin θ, cos θ) in pixel space.
-    # True horizontal is perpendicular: (cos θ, sin θ).
     dx = hc_x - kt_x
     dy = hc_y - kt_y
-    roll_rad = math.radians(camera_roll)
+    roll_rad = math.radians(roll_deg)
     cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
-    along_vert  = -dx * sin_r + dy * cos_r   # positive = hc is below kt in gravity = depth
+    along_vert  = -dx * sin_r + dy * cos_r
     along_horiz =  dx * cos_r + dy * sin_r
-    # Angle from true horizontal: positive = hc below kt = depth achieved.
-    return math.degrees(math.atan2(along_vert, max(abs(along_horiz), 1e-6)))
+    theta_obs = math.atan2(along_vert, max(abs(along_horiz), 1e-6))
+
+    sin_az = math.sin(math.radians(azimuth_deg))
+    if sin_az > 1e-6:
+        return math.degrees(math.atan(math.tan(theta_obs) / sin_az))
+    return math.degrees(theta_obs)
 
 
 # ── Metric builders ───────────────────────────────────────────────────────────
@@ -328,22 +340,19 @@ class RepStateMachine:
             # for live drawing decisions
     """
 
-    def __init__(self, frame_height: float, fps: float, side: str, camera_roll: float = 0.0) -> None:
+    def __init__(self, frame_height: float, fps: float, side: str, cal: CameraCalibration | None = None) -> None:
         """
         Args:
             frame_height: full-resolution frame height in pixels.
-                          Used to compute threshold distances as fractions of frame.
-            fps:          video frame rate.  Used to convert frame counts to seconds.
-            side:         "left" | "right" — which landmark side to use.
-                          Determined by _select_side() before the loop begins.
-            camera_roll:  camera tilt in degrees (positive = pixel-vertical leans right
-                          of true vertical).  Subtracted from all angle computations so
-                          results are relative to gravitational vertical/horizontal.
+            fps:          video frame rate.
+            side:         "left" | "right".
+            cal:          CameraCalibration with roll_deg and azimuth_deg.
+                          Defaults to zero correction if None.
         """
         self.frame_height = frame_height
         self.fps          = fps
         self.side         = side
-        self.camera_roll  = camera_roll
+        self.cal          = cal or CameraCalibration()
 
         # ── Public state (safe to read between feed() calls for live drawing) ──
         self.phase: Phase          = Phase.STANDING
@@ -639,11 +648,9 @@ class RepStateMachine:
             smooth_val: current smoothed hip_y (unused here, available if needed).
         """
         hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, self.side)
-        # Project kt→hc onto the true vertical reference axis (-sin θ, cos θ).
-        # along_vert > 0 means hc is below kt in gravity coords = depth achieved.
         dx = hc_x - kt_x
         dy = hc_y - kt_y
-        roll_rad = math.radians(self.camera_roll)
+        roll_rad = math.radians(self.cal.roll_deg)
         along_vert = -dx * math.sin(roll_rad) + dy * math.cos(roll_rad)
         at_depth = along_vert > 0
         self._depth_flags.append(at_depth)
@@ -652,7 +659,7 @@ class RepStateMachine:
         if gap < self._min_gap_px:
             self._min_gap_px = gap
 
-        angle = _tibial_angle(fdata, self.side, self.camera_roll)
+        angle = _tibial_angle(fdata, self.side, self.cal)
         self._tibial_angles[frame_idx] = round(angle, 1)
 
         if self.phase == Phase.DESCENDING:
@@ -732,7 +739,7 @@ class RepStateMachine:
         tempo["flags"] = flags
 
         depth_angle = (
-            _depth_angle_at_frame(self._bottom_fdata, self.side, self.camera_roll)
+            _depth_angle_at_frame(self._bottom_fdata, self.side, self.cal)
             if self._bottom_fdata is not None
             else None
         )

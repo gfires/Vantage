@@ -33,6 +33,7 @@ RED     = (60, 60, 220)
 DARK    = (20, 20, 20)
 GRAY    = (160, 160, 160)
 CYAN    = (200, 200, 0)    # velocity sparkline, HOLE/MCV labels
+ORANGE  = (0, 140, 255)
 PURPLE  = (210, 0, 220)    # tibial angle annotation
 
 GRAPH_FRAMES = 90   # frames shown in scrolling graph
@@ -125,14 +126,19 @@ def _coaching_panel_coords(frame_w):
 
 # ── Draw functions ────────────────────────────────────────────────────────────
 
-def _draw_axes_compass(frame, camera_roll: float) -> None:
+def _draw_axes_compass(frame, cal) -> None:
     """
-    Top-left debug box showing calibrated vertical and horizontal axes.
+    Top-left debug box showing calibrated vertical, horizontal, and azimuth axes.
 
-    Draws a small compass: two crossed arrows radiating from a centre point,
-    rotated by camera_roll so they represent true gravity axes in pixel space.
-    Labeled V (vertical, green) and H (horizontal, white), plus the roll value.
+    V (green)      — true vertical after roll correction
+    H (white)      — true horizontal (sagittal axis)
+    Az (orange)    — heel-vector azimuth; φ° from vertical in the frontal plane
     """
+    from pose import CameraCalibration
+    if not isinstance(cal, CameraCalibration):
+        # legacy: plain float camera_roll passed directly
+        cal = CameraCalibration(roll_deg=float(cal))
+
     PAD = 12
     BOX_W, BOX_H = 110, 110
     x0, y0 = PAD, PAD
@@ -143,33 +149,42 @@ def _draw_axes_compass(frame, camera_roll: float) -> None:
 
     cx = x0 + BOX_W // 2
     cy = y0 + BOX_H // 2
-    ARM = 36  # half-length of each axis arrow
+    ARM = 36
 
-    roll_rad = math.radians(camera_roll)
+    roll_rad = math.radians(cal.roll_deg)
     sin_r, cos_r = math.sin(roll_rad), math.cos(roll_rad)
 
-    # True vertical axis in pixel space: direction (-sin θ, cos θ) points downward.
-    # Positive camera_roll = clockwise = true gravity leans left of pixel-down.
-    vx = int(round(cx - sin_r * ARM))
-    vy = int(round(cy + cos_r * ARM))
+    # True vertical: (-sin θ, cos θ) points downward in pixel space
+    vx     = int(round(cx - sin_r * ARM))
+    vy     = int(round(cy + cos_r * ARM))
     vx_neg = int(round(cx + sin_r * ARM))
     vy_neg = int(round(cy - cos_r * ARM))
     cv2.arrowedLine(frame, (cx, cy), (vx, vy),         GREEN, 2, cv2.LINE_AA, tipLength=0.25)
     cv2.arrowedLine(frame, (cx, cy), (vx_neg, vy_neg), GREEN, 1, cv2.LINE_AA, tipLength=0.2)
 
-    # True horizontal axis in pixel space: direction (cos θ, sin θ) points right.
-    hx = int(round(cx + cos_r * ARM))
-    hy = int(round(cy + sin_r * ARM))
+    # True horizontal: (cos θ, sin θ) points right in pixel space
+    hx     = int(round(cx + cos_r * ARM))
+    hy     = int(round(cy + sin_r * ARM))
     hx_neg = int(round(cx - cos_r * ARM))
     hy_neg = int(round(cy - sin_r * ARM))
     cv2.arrowedLine(frame, (cx, cy), (hx, hy),         WHITE, 2, cv2.LINE_AA, tipLength=0.25)
     cv2.arrowedLine(frame, (cx, cy), (hx_neg, hy_neg), WHITE, 1, cv2.LINE_AA, tipLength=0.2)
 
-    cv2.putText(frame, "V", (vx_neg - 10, vy_neg + 4),  cv2.FONT_HERSHEY_SIMPLEX, 0.4, GREEN, 1, cv2.LINE_AA)
-    cv2.putText(frame, "H", (hx + 4, hy + 4),           cv2.FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1, cv2.LINE_AA)
+    # Azimuth: φ° from vertical toward horizontal in the frontal plane.
+    # Direction = rotate true-vertical by φ toward true-horizontal:
+    #   ax = -sin(roll)*cos(φ) + cos(roll)*sin(φ)  =  sin(φ - roll)   ... in x
+    #   ay =  cos(roll)*cos(φ) + sin(roll)*sin(φ)  =  cos(φ - roll)   ... in y (down)
+    az_rad = math.radians(cal.azimuth_deg)
+    ax = int(round(cx + (cos_r * math.sin(az_rad) - sin_r * math.cos(az_rad)) * ARM))
+    ay = int(round(cy + (cos_r * math.cos(az_rad) + sin_r * math.sin(az_rad)) * ARM))
+    cv2.arrowedLine(frame, (cx, cy), (ax, ay), ORANGE, 2, cv2.LINE_AA, tipLength=0.25)
 
-    roll_label = f"{camera_roll:+.1f}deg" if camera_roll != 0.0 else "0.0deg"
-    cv2.putText(frame, roll_label, (x0 + 6, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.38, GRAY, 1, cv2.LINE_AA)
+    cv2.putText(frame, "V",  (vx_neg - 10, vy_neg + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, GREEN,  1, cv2.LINE_AA)
+    cv2.putText(frame, "H",  (hx + 4, hy + 4),          cv2.FONT_HERSHEY_SIMPLEX, 0.4, WHITE,  1, cv2.LINE_AA)
+    cv2.putText(frame, "Az", (ax + 3, ay + 4),           cv2.FONT_HERSHEY_SIMPLEX, 0.4, ORANGE, 1, cv2.LINE_AA)
+
+    roll_label = f"r{cal.roll_deg:+.1f} az{cal.azimuth_deg:+.1f}"
+    cv2.putText(frame, roll_label, (x0 + 4, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, GRAY, 1, cv2.LINE_AA)
 
 
 def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None, is_bottom=False):
