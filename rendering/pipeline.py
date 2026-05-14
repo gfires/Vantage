@@ -46,6 +46,7 @@ from rendering.draw import (
     _estimated_marker_ys,
 )
 from params import (
+    CAL_PROBE_FRAMES,
     CLOSE_THRESHOLD,
     DRAW_SMOOTHING,
     PIPELINE_DELAY,
@@ -318,16 +319,16 @@ def _process_video(
             return []
 
         if probe_raw_frames:
-            tilt = detect_upright_tilt(probe_raw_frames)
+            tilt = detect_upright_tilt(probe_raw_frames[:CAL_PROBE_FRAMES])
             if tilt is not None:
                 cal = CameraCalibration(roll_deg=tilt)
                 print(f"  Camera roll: {tilt:+.1f}° (rack upright detected — correcting angles)")
             else:
                 print("  Camera roll: n/a (no rack upright detected — using raw pixel coords)")
 
-        # Extract azimuth: median across all valid probe frames (heels first, wrists fallback)
+        # Extract azimuth: median across first CAL_PROBE_FRAMES valid probe frames
         az_samples = []
-        for _, fdata_probe in probe_valid:
+        for _, fdata_probe in probe_valid[:CAL_PROBE_FRAMES]:
             az = azimuth_deg_from_fdata(fdata_probe)
             if az is not None:
                 az_samples.append(az)

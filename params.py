@@ -16,15 +16,9 @@ KNEE_TOP_OVERSHOOT = 0.18
 HIP_CREASE_FRAC = 0.88
 
 # ── Depth detection ───────────────────────────────────────────────────────────
-VISIBILITY_THRESHOLD = 0.7   # min landmark visibility to use a side
-DEPTH_WINDOW         = 5     # frames around bottom to check depth condition
 MIN_DEPTH_FRAMES     = 3     # consecutive depth frames required for PASS
 SMOOTHING_WINDOW     = 5     # rolling average for hip-Y bottom detection
 CLOSE_THRESHOLD      = 0.02  # within 2% of frame height → BORDERLINE
-
-# ── Rep segmentation ──────────────────────────────────────────────────────────
-REP_SMOOTHING  = 15   # smoothing window for hip-crease height signal
-MIN_REP_FRAMES = 15   # min frames between standing peaks / min segment length
 
 # ── State machine ─────────────────────────────────────────────────────────────
 MIN_HOLD_FRAMES       = 4     # consecutive frames a direction must hold before a
@@ -47,8 +41,8 @@ DESCENT_SLOW_S   = 4.0   # descent slower than this → flag "SLOW DESC"
 GRIND_RATIO      = 2   # ascent_time > descent_time * GRIND_RATIO → "GRIND"
 
 # ── Tibial angle ──────────────────────────────────────────────────────────────
-# Shin angle from vertical (degrees).  Measured as atan2(|knee_x - heel_x|, |knee_y - heel_y|).
-# Low-bar squat context: upright shin is expected; >35 deg is notable, >45 deg is problematic.
+# Shin angle from vertical (degrees), roll- and azimuth-corrected.
+# Low-bar squat context: upright shin is expected; >35 deg is notable.
 TIBIAL_NOTE_DEG = 25.0   # above this → forward knee travel worth watching (low-bar)
 TIBIAL_WARN_DEG = 35.0   # above this → outside low-bar norms, ankle mobility / stance issue
 
@@ -64,7 +58,7 @@ HOLE_MCV_NOTE  = 0.80    # HOLE < 80% of MCV → slight hole stall (info only)
 HOLE_EXIT_FRACTION = 0.25   # first 25% of ascent frames — covers the true out-of-hole drive window
 
 # ── Camera calibration (upright tilt detection) ───────────────────────────────
-CAL_PROBE_FRAMES   = 5       # frames to sample for upright detection (uses the pipeline delay buffer)
+CAL_PROBE_FRAMES   = 3       # frames to sample for upright/azimuth detection (uses the pipeline delay buffer)
 CAL_BLUR_KERNEL    = (5, 5)  # Gaussian blur kernel for edge pre-processing
 CAL_CANNY_LOW      = 50      # Canny lower threshold
 CAL_CANNY_HIGH     = 150     # Canny upper threshold
@@ -73,4 +67,3 @@ CAL_HOUGH_MIN_LENGTH  = 40   # minimum line length in pixels (at half-res)
 CAL_HOUGH_MAX_GAP     = 10   # maximum gap between collinear segments (at half-res)
 CAL_UPRIGHT_TOL_DEG   = 20   # lines within this many degrees of vertical are upright candidates
 CAL_TILT_MAX_DEG      = 4.0  # detected tilt clamped to this range; fallback 0.0 if no upright found
-CAL_SAGITTAL_TOL_DEG  = 25   # lines within this many degrees of horizontal are sagittal candidates

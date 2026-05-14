@@ -66,7 +66,9 @@ Y increases downward (screen coordinates). Everything follows from that:
 
 - **Depth flag**: `hc_y > kt_y` → hip crease is below knee top in screen coords → depth achieved
 - **Depth angle**: `rise = hc_y - kt_y` → positive = depth achieved, negative = short
-- **Tibial angle**: `atan2(|knee_x − heel_x|, |heel_y − knee_y|)` — always ≥ 0°, increases as knee travels forward
+- **Tibial angle**: roll-corrected then azimuth-corrected: `atan(tan(θ_obs) / sin(φ))` — always ≥ 0°, increases as knee travels forward
+- **Depth angle**: same two-step correction applied to the hc→kt vector angle against horizontal
+- **Azimuth φ**: measured from vertical; 0° = pure side profile, 90° = facing camera. `sin(φ)` is the foreshortening factor (sin≈1 at side-on → minimal correction)
 - **Velocity**: `−Δhc_y × fps / frame_height` — negated so upward motion is positive
 
 ### State machine transitions (`state_machine.py`)
@@ -98,9 +100,27 @@ Replaces the old two-pass analyze→render sequence. A single forward sweep does
 7. Draw all overlays onto `tail_frame`
 8. JPEG-encode and stream / write to MP4
 
-**Probe phase** (before main loop): reads first `PIPELINE_DELAY` frames, selects side via z-coordinates, constructs `RepStateMachine`.
+**Probe phase** (before main loop): reads first `PIPELINE_DELAY` frames, selects side via z-coordinates, runs camera calibration on the first `CAL_PROBE_FRAMES = 3` of those frames (vertical tilt via Hough + azimuth via heel-vector median), constructs `RepStateMachine` with a `CameraCalibration` object. Zero additional latency — calibration runs within the frames already buffered.
 
 **Flush phase** (after decode ends): drains the remaining buffered frames without new inference.
+
+### Camera calibration (`pose.py`, `scripts/calibrate.py`, `rendering/pipeline.py`)
+
+`CameraCalibration` dataclass (in `pose.py`) carries two values determined during the probe phase:
+
+| Field | Source | Convention |
+|---|---|---|
+| `roll_deg` | Hough line on rack upright; median of probe frames, clamped ±4° | positive = top of upright leans right |
+| `azimuth_deg` | Heel-vector angle from vertical; median of probe frames; wrists as fallback | 0° = pure side profile, 90° = facing camera |
+
+**Roll correction** (frame of reference): the `(dx, dy)` heel→knee or hc→kt vector is decomposed onto the true vertical/horizontal axes via a 2D rotation by `roll_deg`. The coordinate system rotates; the landmarks do not.
+
+**Azimuth correction** (foreshortening): the sagittal plane is foreshortened by `sin(φ)` when the lifter is `φ` degrees from pure side-on. Applied after roll:
+```
+tan(θ_true) = tan(θ_obs) / sin(φ)
+```
+- Depth pass/fail (`hc_y > kt_y`) is azimuth-invariant (Y-comparison; both landmarks compress equally in X) — no correction applied.
+- `min_gap_px` (borderline threshold) uses roll-corrected pixel units — azimuth correction not needed since it's compared against a relative threshold.
 
 ### Landmark extraction (`pose.py`)
 
@@ -137,6 +157,13 @@ Classification per rep:
 ### Draw smoothing
 
 MediaPipe landmarks jitter frame-to-frame. A separate `_smooth_one_frame` pass applies a `DRAW_SMOOTHING = 3` frame rolling box average per joint, producing `fdata_draw` used exclusively for skeleton rendering and tibial arc display. Classification always uses raw `fdata`.
+
+### Axes compass overlay (`rendering/draw.py`)
+
+Top-left debug box showing three calibrated axes as arrows:
+- **V** (green) — true vertical after roll correction
+- **H** (white) — sagittal horizontal axis
+- **Az** (orange) — heel-vector azimuth, φ° from vertical in the frontal plane
 
 ---
 
@@ -211,7 +238,6 @@ HIP_CREASE_FRAC       = 0.88   # fraction along shoulder→hip for crease marker
 MIN_DEPTH_FRAMES      = 3      # consecutive depth frames required for PASS
 CLOSE_THRESHOLD       = 0.02   # within 2% of frame height → BORDERLINE
 SMOOTHING_WINDOW      = 5      # hip Y rolling average for state machine signal
-VISIBILITY_THRESHOLD  = 0.7    # min landmark visibility to use a side
 
 # State machine
 MIN_HOLD_FRAMES       = 4      # consecutive frames to confirm phase transition
@@ -237,7 +263,7 @@ HOLE_MCV_WARN         = 0.60   # HOLE < 60% of MCV → WEAK HOLE
 HOLE_MCV_NOTE         = 0.80   # informational threshold
 
 # Camera calibration
-CAL_PROBE_FRAMES      = 5      # frames to sample for upright detection
+CAL_PROBE_FRAMES      = 3      # frames to sample for upright/azimuth detection (subset of PIPELINE_DELAY buffer)
 CAL_BLUR_KERNEL       = (5, 5) # Gaussian blur kernel before Canny
 CAL_CANNY_LOW         = 50
 CAL_CANNY_HIGH        = 150
@@ -245,6 +271,7 @@ CAL_HOUGH_THRESHOLD   = 40     # HoughLinesP accumulator votes (at half-res)
 CAL_HOUGH_MIN_LENGTH  = 40     # minimum line length in pixels (at half-res)
 CAL_HOUGH_MAX_GAP     = 10     # maximum collinear gap in pixels (at half-res)
 CAL_UPRIGHT_TOL_DEG   = 20     # max deviation from vertical to count as upright candidate
+CAL_TILT_MAX_DEG      = 4.0    # detected tilt clamped to this range; fallback 0.0 if no upright found
 ```
 
 ---
@@ -336,8 +363,6 @@ All three axes degrade gracefully: sagittal requires vertical; azimuth requires 
 
 ## In Progress / Not Yet Built
 
-- **Camera calibration integration**: `scripts/calibrate.py` detects all 3 axes — vertical (Hough), azimuth (heel/wrist landmarks), sagittal (perpendicular to vertical). Next: integrate as a `CameraCalibration` preprocessing layer in `_process_video` to rectify landmark coordinates before metric computation
-- **Perspective correction**: angle metrics (tibial, depth, back) are currently computed in raw pixel space — perspective-sensitive for non-ideal camera placement. Calibration will rectify landmark coordinates before metric computation
 - **Claude AI coaching**: Anthropic SDK in requirements, not wired
 - **GPU inference**: MediaPipe supports CoreML delegates; would reduce ~21.8ms → ~2–5ms/frame
 - **Side selection UI**: `api.py` currently hardcodes `force_side="right"`
