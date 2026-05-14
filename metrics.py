@@ -13,109 +13,13 @@ from params import (
     DESCENT_FAST_S,
     DESCENT_SLOW_S,
     GRIND_RATIO,
-    HOLE_EXIT_FRACTION,
+    HOLE_MCV_WARN,
+    STICK_NOTE_PCT,
+    STICK_WARN_PCT,
     TIBIAL_NOTE_DEG,
     TIBIAL_WARN_DEG,
-    HOLE_MCV_WARN,
 )
 from pose import estimated_markers, CameraCalibration
-
-
-def compute_tempo(
-    rep: dict, frames_data: list, side: str, fps: float,
-    cal: "CameraCalibration | None" = None,
-) -> dict:
-    """
-    Compute phase durations and concentric velocity profile for one rep.
-
-    Phases:
-      descent  — rep start → bottom frame
-      ascent   — bottom frame → rep end
-
-    Velocity profile is computed over the ascent only: hip-crease Y displacement
-    per frame, normalised by frame height, negated so rising = positive.
-
-    Returns:
-        descent_s       float   descent duration in seconds
-        ascent_s        float   ascent duration in seconds
-        velocity        list[float]   per-frame normalised velocity during ascent
-                                      (length = ascent_frames - 1)
-        sticking_pct    int     0–100, where in the ascent velocity is lowest
-                                (within first third — the diagnostic window)
-        flags           list[str]   any out-of-range labels
-    """
-    start  = rep["start_global"]
-    bottom = rep["bottom_global"]
-    end    = rep["end_global"]
-
-    descent_frames = max(bottom - start, 1)
-    ascent_frames  = max(end - bottom, 1)
-    descent_s = descent_frames / fps
-    ascent_s  = ascent_frames  / fps
-
-    # Hip-crease Y over the ascent window (bottom → end, inclusive)
-    frame_height = None
-    hc_ys = []
-    for i in range(bottom, end + 1):
-        f = frames_data[i] if i < len(frames_data) else None
-        if f is None:
-            hc_ys.append(float("nan"))
-            continue
-        if frame_height is None:
-            frame_height = f["height"]
-        hc_y, _, _, _ = estimated_markers(f, side, cal)
-        hc_ys.append(hc_y)
-
-    if frame_height is None or len(hc_ys) < 2:
-        return {
-            "descent_s": round(descent_s, 2),
-            "ascent_s":  round(ascent_s, 2),
-            "velocity":  [],
-            "sticking_pct": None,
-            "flags": [],
-        }
-
-    hc_arr = np.array(hc_ys, dtype=float)
-    # Rising = Y decreasing → negate so positive = moving upward
-    velocity = (-np.diff(hc_arr) * fps / frame_height).tolist()
-
-    # ── Velocity quantification ───────────────────────────────────────────────
-    valid_v = [v for v in velocity if not math.isnan(v)]
-
-    # Mean concentric velocity: average over full ascent
-    mean_concentric_vel = round(float(np.mean(valid_v)), 4) if valid_v else None
-
-    # Hole-exit velocity: mean over first HOLE_EXIT_FRACTION of ascent
-    hole_exit_n = max(1, int(len(velocity) * HOLE_EXIT_FRACTION))
-    hole_exit_vals = [v for v in velocity[:hole_exit_n] if not math.isnan(v)]
-    hole_exit_vel = round(float(np.mean(hole_exit_vals)), 4) if hole_exit_vals else None
-
-    # ── Coaching flags ────────────────────────────────────────────────────────
-    flags = []
-
-    if descent_s < DESCENT_FAST_S:
-        flags.append("FAST DESC")
-    elif descent_s > DESCENT_SLOW_S:
-        flags.append("SLOW DESC")
-    if ascent_s > descent_s * GRIND_RATIO:
-        flags.append("GRIND")
-
-    # Hole-exit quality: HOLE as fraction of MCV
-    hole_mcv_ratio = None
-    if hole_exit_vel is not None and mean_concentric_vel and mean_concentric_vel > 1e-6:
-        hole_mcv_ratio = round(hole_exit_vel / mean_concentric_vel, 3)
-        if hole_mcv_ratio < HOLE_MCV_WARN:
-            flags.append("WEAK HOLE")
-
-    return {
-        "descent_s":           round(descent_s, 2),
-        "ascent_s":            round(ascent_s, 2),
-        "velocity":            [round(v, 4) if not math.isnan(v) else None for v in velocity],
-        "mean_concentric_vel": mean_concentric_vel,
-        "hole_exit_vel":       hole_exit_vel,
-        "hole_mcv_ratio":      hole_mcv_ratio,
-        "flags":               flags,
-    }
 
 
 def compute_tibial_angle(rep: dict, frames_data: list, side: str) -> dict:
@@ -267,6 +171,13 @@ def compute_flags(tempo: dict, tibial: dict) -> list[str]:
     hole_mcv_ratio = tempo.get("hole_mcv_ratio")
     if hole_mcv_ratio is not None and hole_mcv_ratio < HOLE_MCV_WARN:
         flags.append("WEAK HOLE")
+
+    svp = tempo.get("sticking_vel_pct")
+    if svp is not None:
+        if svp < STICK_WARN_PCT:
+            flags.append("STICKING")
+        elif svp < STICK_NOTE_PCT:
+            flags.append("STICKING (MILD)")
 
     max_tib = tibial.get("max_angle")
     if max_tib is not None:

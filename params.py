@@ -42,8 +42,8 @@ PIPELINE_DELAY = SMOOTHING_WINDOW + MIN_HOLD_FRAMES  # currently 5 + 4 = 9 frame
 DRAW_SMOOTHING = 3           # rolling average for skeleton/marker rendering coords
 
 # ── Speed & tempo thresholds ──────────────────────────────────────────────────
-DESCENT_FAST_S   = 1.0   # descent faster than this → flag "FAST DESC"
-DESCENT_SLOW_S   = 4.0   # descent slower than this → flag "SLOW DESC"
+DESCENT_FAST_S   = 1.25   # descent faster than this → flag "FAST DESC"
+DESCENT_SLOW_S   = 3.5   # descent slower than this → flag "SLOW DESC"
 # Ascent/descent ratio above which the rep is flagged as a grind
 GRIND_RATIO      = 2   # ascent_time > descent_time * GRIND_RATIO → "GRIND"
 
@@ -63,6 +63,10 @@ HOLE_MCV_NOTE  = 0.80    # HOLE < 80% of MCV → slight hole stall (info only)
 # ── Velocity ──────────────────────────────────────────────────────────────────
 # Fraction of the ascent used as the "out of hole" window.
 HOLE_EXIT_FRACTION = 0.25   # first 25% of ascent frames — covers the true out-of-hole drive window
+STICK_WINDOW_START = 0.25   # sticking point search starts at 25% of ascent
+STICK_WINDOW_END   = 0.80   # sticking point search ends at 80% of ascent
+STICK_NOTE_PCT     = 60     # sticking vel < 60% of MCV → informational note
+STICK_WARN_PCT     = 40     # sticking vel < 40% of MCV → flag "STICKING"
 
 # ── Camera calibration (upright tilt detection) ───────────────────────────────
 CAL_PROBE_FRAMES   = 3       # frames to sample for upright/azimuth detection (uses the pipeline delay buffer)

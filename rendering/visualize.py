@@ -73,6 +73,14 @@ def _output_rep_table(reps: list, output_path: str) -> None:
         "Descent time": [f"{rep['tempo'].get('descent_s', 0):.2f}s"                   for rep in reps],
         "Hole time":    [_hole_s(rep)                                                  for rep in reps],
         "Ascent time":  [f"{rep['tempo'].get('ascent_s', 0):.2f}s"                    for rep in reps],
+        "Stick pos":    [
+            (f"{rep['tempo'].get('sticking_pct')}%" if rep['tempo'].get('sticking_pct') is not None else "--")
+            for rep in reps
+        ],
+        "Stick vel":    [
+            (f"{rep['tempo'].get('sticking_vel_pct')}%" if rep['tempo'].get('sticking_vel_pct') is not None else "--")
+            for rep in reps
+        ],
         "Depth angle": [
             (f"{rep['depth_angle']:+.1f}deg" if rep.get("depth_angle") is not None else "--")
             for rep in reps
