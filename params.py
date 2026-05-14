@@ -7,13 +7,20 @@ duplicates in pose, metrics, or visualize.
 """
 
 # ── Anatomical marker estimation ──────────────────────────────────────────────
-# Knee-top marker: extends the heel→knee vector this fraction *past* the knee
-# joint center.  0.18 = 18% of heel-to-knee distance above the knee center.
-KNEE_TOP_OVERSHOOT = 0.18
+# All offsets are computed in azimuth-decompressed (true) space and recompressed
+# before adding to the anchor joint.  Unit vectors are scaled by segment length.
 
-# Hip-crease marker: this fraction of the way along the shoulder→hip vector.
-# 0.88 = 88% down from shoulder (≈ 12% above the hip joint center).
-HIP_CREASE_FRAC = 0.88
+# Hip crease: offset from hip = a*(torso_unit) + b*(femur_unit) + c*sin(hip_flex)*(sagittal)
+# torso = hip→shoulder, femur = hip→knee
+HC_TORSO_COEFF    = 0.18   # along hip→shoulder, fraction of torso length
+HC_FEMUR_COEFF    = 0.10   # along hip→knee, fraction of femur length
+HC_SAGITTAL_COEFF = 0.12   # anterior shift, scales with sin(hip flexion angle)
+
+# Knee top: offset from knee = a*(tibial_unit) + b*(femoral_unit) + g*sin(knee_flex)*(sagittal)
+# tibial = heel→knee, femoral = hip→knee
+KT_TIBIAL_COEFF   = 0.14   # along heel→knee, fraction of tibial length
+KT_FEMORAL_COEFF  = 0.06   # along hip→knee, fraction of femoral length
+KT_SAGITTAL_COEFF = 0.15   # anterior patellar shift, scales with sin(knee flexion angle)
 
 # ── Depth detection ───────────────────────────────────────────────────────────
 MIN_DEPTH_FRAMES     = 3     # consecutive depth frames required for PASS

@@ -18,11 +18,10 @@ import numpy as np
 from params import (
     CLOSE_THRESHOLD,
     DRAW_SMOOTHING,
-    HIP_CREASE_FRAC,
     HOLE_MCV_NOTE,
-    KNEE_TOP_OVERSHOOT,
     TIBIAL_WARN_DEG,
 )
+from pose import estimated_markers, CameraCalibration
 
 # ── Colors (BGR) ──────────────────────────────────────────────────────────────
 WHITE   = (255, 255, 255)
@@ -46,23 +45,12 @@ def _pt(landmark) -> tuple:
     return (int(landmark[0]), int(landmark[1]))
 
 
-def _estimated_marker_ys(fdata, side) -> tuple:
+def _estimated_marker_ys(fdata, side, cal: "CameraCalibration | None" = None) -> tuple:
     """
     Return ((hc_y, kt_y), (hc_x, kt_x)) using the tuned anatomical offsets.
-    Used for both depth detection logic and drawing.
     hc_y > kt_y in screen coords → depth achieved.
     """
-    heel     = fdata[f"{side}_heel"]
-    knee     = fdata[f"{side}_knee"]
-    shoulder = fdata[f"{side}_shoulder"]
-    hip      = fdata[f"{side}_hip"]
-
-    kt_y = heel[1] + (knee[1] - heel[1]) * (1.0 + KNEE_TOP_OVERSHOOT)
-    kt_x = heel[0] + (knee[0] - heel[0]) * (1.0 + KNEE_TOP_OVERSHOOT)
-
-    hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
-    hc_x = shoulder[0] + (hip[0] - shoulder[0]) * HIP_CREASE_FRAC
-
+    hc_y, kt_y, hc_x, kt_x = estimated_markers(fdata, side, cal)
     return (hc_y, kt_y), (hc_x, kt_x)
 
 
@@ -187,14 +175,14 @@ def _draw_axes_compass(frame, cal) -> None:
     cv2.putText(frame, roll_label, (x0 + 4, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.35, GRAY, 1, cv2.LINE_AA)
 
 
-def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None, is_bottom=False):
+def _draw_skeleton(frame, fdata, side, depth_active, near_depth, tibial_angle=None, is_bottom=False, cal=None):
     """Draw joint connections and circles for the selected side."""
     hip      = _pt(fdata[f"{side}_hip"])
     knee     = _pt(fdata[f"{side}_knee"])
     shoulder = _pt(fdata[f"{side}_shoulder"])
     heel     = _pt(fdata[f"{side}_heel"])
 
-    (hc_y, kt_y), (hc_x, kt_x) = _estimated_marker_ys(fdata, side)
+    (hc_y, kt_y), (hc_x, kt_x) = _estimated_marker_ys(fdata, side, cal)
     hip_crease = (int(hc_x), int(hc_y))
     knee_top   = (int(kt_x), int(kt_y))
 

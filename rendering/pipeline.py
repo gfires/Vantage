@@ -243,7 +243,7 @@ def _process_video(
 
         if fdata_draw is not None:
             frame_h     = fdata["height"]
-            (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side)
+            (hc_y, kt_y), _ = _estimated_marker_ys(fdata, side, cal)
             depth_active = hc_y > kt_y
             near_depth   = abs(hc_y - kt_y) < (frame_h * CLOSE_THRESHOLD)
 
@@ -255,7 +255,7 @@ def _process_video(
 
             is_bottom = (sm.bottom_frame is not None and frame_idx == sm.bottom_frame)
 
-            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle, is_bottom)
+            _draw_skeleton(frame, fdata_draw, side, depth_active, near_depth, tib_angle, is_bottom, cal)
             _draw_graph(frame, hip_y_deque, knee_y_deque, None, h)
             _draw_phase_box(frame, sm.phase.name, h)
             _draw_metrics_hud(frame, last_rep, frame_idx, w)

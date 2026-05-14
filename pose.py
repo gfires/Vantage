@@ -203,6 +203,116 @@ def azimuth_deg_from_fdata(fdata: dict | None) -> float | None:
     return math.degrees(math.atan2(abs(dx), max(abs(dy), 1e-6)))
 
 
+def estimated_markers(
+    fdata: dict,
+    side: str,
+    cal: "CameraCalibration | None" = None,
+) -> tuple[float, float, float, float]:
+    """
+    Estimate anatomical hip-crease and knee-top positions from joint landmarks.
+
+    Both offsets are computed in azimuth-decompressed (true) space so that unit
+    vectors are geometrically correct, then recompressed before adding to the
+    anchor joint.
+
+    Hip crease = hip + a*(torso_unit)*torso_len + b*(femur_unit)*femur_len
+                      + c*sin(hip_flex)*(sagittal)
+      torso = hip→shoulder, femur = hip→knee, hip_flex = included angle at hip.
+
+    Knee top   = knee + a*(tibial_unit)*tibial_len + b*(femoral_unit)*femoral_len
+                      + g*sin(knee_flex)*(sagittal)
+      tibial = heel→knee, femoral = hip→knee, knee_flex = included angle at knee.
+
+    The sagittal axis is the roll-corrected horizontal, oriented anteriorly using
+    the sign of (knee_x - heel_x).
+
+    Returns:
+        (hc_y, kt_y, hc_x, kt_x) in full-resolution pixel coordinates.
+        hc_y > kt_y in screen coords means hip crease is below knee top (depth).
+    """
+    from params import (
+        HC_TORSO_COEFF, HC_FEMUR_COEFF, HC_SAGITTAL_COEFF,
+        KT_TIBIAL_COEFF, KT_FEMORAL_COEFF, KT_SAGITTAL_COEFF,
+    )
+
+    heel     = fdata[f"{side}_heel"]
+    knee     = fdata[f"{side}_knee"]
+    shoulder = fdata[f"{side}_shoulder"]
+    hip      = fdata[f"{side}_hip"]
+
+    sin_az   = math.sin(math.radians(cal.azimuth_deg)) if cal is not None else 0.0
+    use_az   = sin_az > 1e-6
+
+    def _dx(x):
+        return x / sin_az if use_az else x
+
+    def _rx(x):
+        return x * sin_az if use_az else x
+
+    def _decomp(pt):
+        return (_dx(pt[0]), pt[1])
+
+    shoulder_d = _decomp(shoulder)
+    hip_d      = _decomp(hip)
+    knee_d     = _decomp(knee)
+    heel_d     = _decomp(heel)
+
+    def _unit(p1, p2):
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        mag = math.hypot(dx, dy)
+        return (dx / mag, dy / mag) if mag > 1e-6 else (0.0, 0.0)
+
+    def _dist(p1, p2):
+        return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+    # Sagittal axis: roll-corrected horizontal, oriented anteriorly
+    roll_rad = math.radians(cal.roll_deg if cal is not None else 0.0)
+    sagittal_sign = 1.0 if (knee[0] - heel[0]) >= 0 else -1.0
+    sag_x = math.cos(roll_rad) * sagittal_sign
+    sag_y = math.sin(roll_rad) * sagittal_sign
+
+    # ── Hip crease ────────────────────────────────────────────────────────────
+    torso_unit  = _unit(hip_d, shoulder_d)   # hip→shoulder
+    femur_unit  = _unit(hip_d, knee_d)       # hip→knee
+    torso_len   = _dist(hip_d, shoulder_d)
+    femur_len   = _dist(hip_d, knee_d)
+
+    dot_hip     = torso_unit[0]*femur_unit[0] + torso_unit[1]*femur_unit[1]
+    hip_flex    = math.acos(max(-1.0, min(1.0, dot_hip)))
+
+    hc_off_x = (HC_TORSO_COEFF    * torso_unit[0] * torso_len
+              + HC_FEMUR_COEFF    * femur_unit[0] * femur_len
+              + HC_SAGITTAL_COEFF * math.sin(hip_flex) * sag_x)
+    hc_off_y = (HC_TORSO_COEFF    * torso_unit[1] * torso_len
+              + HC_FEMUR_COEFF    * femur_unit[1] * femur_len
+              + HC_SAGITTAL_COEFF * math.sin(hip_flex) * sag_y)
+
+    hc_x = hip[0] + _rx(hc_off_x)
+    hc_y = hip[1] + hc_off_y
+
+    # ── Knee top ──────────────────────────────────────────────────────────────
+    tibial_unit  = _unit(heel_d, knee_d)     # heel→knee
+    femoral_unit = _unit(hip_d, knee_d)      # hip→knee
+    tibial_len   = _dist(heel_d, knee_d)
+    femoral_len  = femur_len                 # same as femur computed above
+
+    # Knee flexion = angle at knee between (knee→heel) and (knee→hip)
+    dot_knee  = (-tibial_unit[0])*(-femoral_unit[0]) + (-tibial_unit[1])*(-femoral_unit[1])
+    knee_flex = math.acos(max(-1.0, min(1.0, dot_knee)))
+
+    kt_off_x = (KT_TIBIAL_COEFF   * tibial_unit[0]  * tibial_len
+              + KT_FEMORAL_COEFF  * femoral_unit[0] * femoral_len
+              + KT_SAGITTAL_COEFF * math.sin(knee_flex) * sag_x)
+    kt_off_y = (KT_TIBIAL_COEFF   * tibial_unit[1]  * tibial_len
+              + KT_FEMORAL_COEFF  * femoral_unit[1] * femoral_len
+              + KT_SAGITTAL_COEFF * math.sin(knee_flex) * sag_y)
+
+    kt_x = knee[0] + _rx(kt_off_x)
+    kt_y = knee[1] + kt_off_y
+
+    return hc_y, kt_y, hc_x, kt_x
+
+
 def _max_consecutive_true(flags: list[bool]) -> int:
     """Return the length of the longest run of True values in flags."""
     best = cur = 0

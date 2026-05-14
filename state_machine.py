@@ -50,11 +50,9 @@ from params import (
     ASCENT_RECOVERY_FRAC,
     CLOSE_THRESHOLD,
     HOLE_EXIT_FRACTION,
-    HIP_CREASE_FRAC,
-    KNEE_TOP_OVERSHOOT,
     TIBIAL_WARN_DEG,
 )
-from pose import _max_consecutive_true, CameraCalibration
+from pose import _max_consecutive_true, CameraCalibration, estimated_markers
 from metrics import compute_flags
 
 
@@ -68,51 +66,17 @@ class Phase(Enum):
 
 # ── Geometry helpers (mirrors visualize._estimated_marker_ys and metrics) ─────
 
-def _hip_crease_y(fdata: dict, side: str) -> float:
-    """
-    Estimate anatomical hip-crease Y from shoulder and hip joint centers.
-
-    Uses HIP_CREASE_FRAC: the crease sits HIP_CREASE_FRAC of the way from
-    shoulder to hip joint center (slightly above the joint center).
-
-    Args:
-        fdata: per-frame landmark dict from pose._extract_landmarks.
-        side:  "left" | "right"
-
-    Returns:
-        Hip-crease Y in full-resolution pixel coordinates (y increases downward).
-    """
-    shoulder = fdata[f"{side}_shoulder"]
-    hip      = fdata[f"{side}_hip"]
-    return shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+def _hip_crease_y(fdata: dict, side: str, cal: "CameraCalibration | None" = None) -> float:
+    """Return hip-crease Y using the full estimated_markers computation."""
+    hc_y, _, _, _ = estimated_markers(fdata, side, cal)
+    return hc_y
 
 
-def _estimated_markers(fdata: dict, side: str) -> tuple[float, float, float, float]:
-    """
-    Estimate anatomical hip-crease and knee-top positions.
-
-    Hip crease: HIP_CREASE_FRAC of the way from shoulder to hip joint center.
-    Knee top:   heel→knee vector extended past the knee by KNEE_TOP_OVERSHOOT.
-
-    Args:
-        fdata: per-frame landmark dict.
-        side:  "left" | "right"
-
-    Returns:
-        (hc_y, kt_y, hc_x, kt_x) — all in full-resolution pixel coordinates.
-        hc_y > kt_y in screen coords means hip crease is below knee top (depth achieved).
-    """
-    heel     = fdata[f"{side}_heel"]
-    knee     = fdata[f"{side}_knee"]
-    shoulder = fdata[f"{side}_shoulder"]
-    hip      = fdata[f"{side}_hip"]
-
-    kt_y = heel[1] + (knee[1] - heel[1]) * (1.0 + KNEE_TOP_OVERSHOOT)
-    kt_x = heel[0] + (knee[0] - heel[0]) * (1.0 + KNEE_TOP_OVERSHOOT)
-    hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
-    hc_x = shoulder[0] + (hip[0] - shoulder[0]) * HIP_CREASE_FRAC
-
-    return hc_y, kt_y, hc_x, kt_x
+def _estimated_markers(
+    fdata: dict, side: str, cal: "CameraCalibration | None" = None
+) -> tuple[float, float, float, float]:
+    """Thin wrapper around pose.estimated_markers for local callers."""
+    return estimated_markers(fdata, side, cal)
 
 
 def _tibial_angle(fdata: dict, side: str, cal: "CameraCalibration | None" = None) -> float:
@@ -175,7 +139,7 @@ def _depth_angle_at_frame(fdata: dict, side: str, cal: "CameraCalibration | None
     roll_deg    = cal.roll_deg    if cal is not None else 0.0
     azimuth_deg = cal.azimuth_deg if cal is not None else 0.0
 
-    hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side)
+    hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, side, cal)
     dx = hc_x - kt_x
     dy = hc_y - kt_y
     roll_rad = math.radians(roll_deg)
@@ -382,6 +346,8 @@ class RepStateMachine:
         self._ascent_hc_ys:    list[float] = []   # hip-crease Y per ascent frame
         self._depth_flags:     list[bool]  = []   # hc_y > kt_y per rep frame
         self._min_gap_px:      float       = float("inf")  # min |hc_y - kt_y| across rep
+        self._best_depth_av:   float       = -float("inf") # max along_vert seen this rep
+        self._best_depth_fdata: dict | None = None          # fdata at that frame
         self._tibial_angles:   dict[int, float] = {}       # frame_idx → tibial angle
         self._frame_height_obs: float | None = None        # observed from first valid frame
 
@@ -548,9 +514,7 @@ class RepStateMachine:
             self._ascent_frames = MIN_HOLD_FRAMES
             # Seed ascent accumulator with hip-crease Y at the bottom frame
             if self._bottom_fdata is not None:
-                shoulder = self._bottom_fdata[f"{self.side}_shoulder"]
-                hip      = self._bottom_fdata[f"{self.side}_hip"]
-                hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+                hc_y = _hip_crease_y(self._bottom_fdata, self.side, self.cal)
                 self._ascent_hc_ys = [hc_y]
             else:
                 self._ascent_hc_ys = []
@@ -583,9 +547,7 @@ class RepStateMachine:
             May set self.phase = Phase.STANDING, reset all _rep accumulators.
         """
         # Accumulate hip-crease Y for velocity computation
-        shoulder = fdata[f"{self.side}_shoulder"]
-        hip      = fdata[f"{self.side}_hip"]
-        hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+        hc_y = _hip_crease_y(fdata, self.side, self.cal)
         self._ascent_hc_ys.append(hc_y)
         self._ascent_frames += 1
 
@@ -647,7 +609,7 @@ class RepStateMachine:
             fdata:      landmark dict for this frame.
             smooth_val: current smoothed hip_y (unused here, available if needed).
         """
-        hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, self.side)
+        hc_y, kt_y, hc_x, kt_x = _estimated_markers(fdata, self.side, self.cal)
         dx = hc_x - kt_x
         dy = hc_y - kt_y
         roll_rad = math.radians(self.cal.roll_deg)
@@ -658,6 +620,10 @@ class RepStateMachine:
         gap = abs(along_vert)
         if gap < self._min_gap_px:
             self._min_gap_px = gap
+        if along_vert > self._best_depth_av:
+            self._best_depth_av    = along_vert
+            self._best_depth_fdata = fdata
+
 
         angle = _tibial_angle(fdata, self.side, self.cal)
         self._tibial_angles[frame_idx] = round(angle, 1)
@@ -705,6 +671,8 @@ class RepStateMachine:
         self._ascent_hc_ys            = []
         self._depth_flags             = []
         self._min_gap_px              = float("inf")
+        self._best_depth_av           = -float("inf")
+        self._best_depth_fdata        = None
         self._tibial_angles           = {}
         self._hold_count              = 0
 
@@ -738,9 +706,10 @@ class RepStateMachine:
         flags = compute_flags(tempo, tibial)
         tempo["flags"] = flags
 
+        depth_ref = self._best_depth_fdata or self._bottom_fdata
         depth_angle = (
-            _depth_angle_at_frame(self._bottom_fdata, self.side, self.cal)
-            if self._bottom_fdata is not None
+            _depth_angle_at_frame(depth_ref, self.side, self.cal)
+            if depth_ref is not None
             else None
         )
 
@@ -749,6 +718,7 @@ class RepStateMachine:
             self._min_gap_px,
             frame_h,
         )
+
 
         return {
             "result":        result,

@@ -10,8 +10,6 @@ import math
 import numpy as np
 
 from params import (
-    KNEE_TOP_OVERSHOOT,
-    HIP_CREASE_FRAC,
     DESCENT_FAST_S,
     DESCENT_SLOW_S,
     GRIND_RATIO,
@@ -20,9 +18,13 @@ from params import (
     TIBIAL_WARN_DEG,
     HOLE_MCV_WARN,
 )
+from pose import estimated_markers, CameraCalibration
 
 
-def compute_tempo(rep: dict, frames_data: list, side: str, fps: float) -> dict:
+def compute_tempo(
+    rep: dict, frames_data: list, side: str, fps: float,
+    cal: "CameraCalibration | None" = None,
+) -> dict:
     """
     Compute phase durations and concentric velocity profile for one rep.
 
@@ -61,9 +63,7 @@ def compute_tempo(rep: dict, frames_data: list, side: str, fps: float) -> dict:
             continue
         if frame_height is None:
             frame_height = f["height"]
-        shoulder = f[f"{side}_shoulder"]
-        hip      = f[f"{side}_hip"]
-        hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
+        hc_y, _, _, _ = estimated_markers(f, side, cal)
         hc_ys.append(hc_y)
 
     if frame_height is None or len(hc_ys) < 2:
@@ -159,7 +159,10 @@ def compute_tibial_angle(rep: dict, frames_data: list, side: str) -> dict:
     }
 
 
-def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None:
+def compute_depth_angle(
+    rep: dict, frames_data: list, side: str,
+    cal: "CameraCalibration | None" = None,
+) -> float | None:
     """
     Compute the best depth angle sustained for >= MIN_DEPTH_FRAMES consecutive frames.
 
@@ -181,14 +184,7 @@ def compute_depth_angle(rep: dict, frames_data: list, side: str) -> float | None
     end   = rep["end_global"]
 
     def _angle_for_frame(f):
-        heel     = f[f"{side}_heel"]
-        knee     = f[f"{side}_knee"]
-        shoulder = f[f"{side}_shoulder"]
-        hip      = f[f"{side}_hip"]
-        kt_y = heel[1] + (knee[1] - heel[1]) * (1.0 + KNEE_TOP_OVERSHOOT)
-        kt_x = heel[0] + (knee[0] - heel[0]) * (1.0 + KNEE_TOP_OVERSHOOT)
-        hc_y = shoulder[1] + (hip[1] - shoulder[1]) * HIP_CREASE_FRAC
-        hc_x = shoulder[0] + (hip[0] - shoulder[0]) * HIP_CREASE_FRAC
+        hc_y, kt_y, hc_x, kt_x = estimated_markers(f, side, cal)
         # Angle of the hc→kt line against horizontal.
         # Use the full 2D distance as denominator so dx≈0 never blows up.
         # Sign: positive = hc below kt (depth achieved), negative = above.
