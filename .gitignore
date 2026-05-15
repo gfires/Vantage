@@ -12,3 +12,4 @@ models/
 
 # OS
 .DS_Store
+.gstack/
