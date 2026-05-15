@@ -22,10 +22,10 @@ from mediapipe.tasks.python import vision as mp_vision
 # ── Model ─────────────────────────────────────────────────────────────────────
 
 MODEL_DIR  = Path(__file__).parent / "models"
-MODEL_PATH = MODEL_DIR / "pose_landmarker_full.task"
+MODEL_PATH = MODEL_DIR / "pose_landmarker_lite.task"
 MODEL_URL  = (
     "https://storage.googleapis.com/mediapipe-models/"
-    "pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+    "pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
 )
 
 
